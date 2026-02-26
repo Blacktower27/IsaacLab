@@ -1,0 +1,23 @@
+# Per-asset conversion config for Isaac Lab MeshConverter.
+# Used by: custom_assets/convert_stl_to_usd.py
+#
+# scale: STL source files are in mm → 0.001 converts to meters
+# collision_approximation options:
+#   convexDecomposition  - multiple convex hulls, best for complex/concave shapes
+#   convexHull           - single convex hull, fast but less accurate
+#   triangleMesh         - exact mesh collision, expensive (avoid for dynamic objects)
+#   none                 - no collision mesh
+
+default:
+  scale: 0.001
+  make_instanceable: true
+  collision_approximation: convexDecomposition
+
+assets:
+  Small_Box.stl:
+    mass: 0.1
+    collision_approximation: convexDecomposition
+
+  Lid_Yellow.stl:
+    mass: 0.02
+    collision_approximation: convexDecomposition
