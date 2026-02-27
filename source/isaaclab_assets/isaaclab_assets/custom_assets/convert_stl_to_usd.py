@@ -96,6 +96,8 @@ simulation_app = app_launcher.app
 # --- imports after Isaac Sim starts ---
 import yaml  # noqa: E402
 
+from pxr import PhysxSchema, Usd, UsdPhysics  # noqa: E402
+
 from isaaclab.sim.converters import MeshConverter, MeshConverterCfg  # noqa: E402
 from isaaclab.sim.schemas import schemas_cfg  # noqa: E402
 
@@ -187,7 +189,31 @@ def convert_one(stl_path: str, usd_path: str, cfg: dict) -> None:
           f"collision={collision_approx}, "
           f"instanceable={cfg['make_instanceable']}")
     converter = MeshConverter(mesh_cfg)
-    print(f"[done]    -> {converter.usd_path}\n")
+
+    # Apply ArticulationRootAPI so IsaacLab's ArticulationCfg can load this USD.
+    # MeshConverter only adds RigidBodyAPI/CollisionAPI; ArticulationRootAPI must
+    # be added manually or spawn_from_usd silently skips it (modify vs define).
+    actual_usd_path = converter.usd_path
+    stage = Usd.Stage.Open(actual_usd_path)
+    articulation_root_prim = None
+    for prim in stage.Traverse():
+        if UsdPhysics.RigidBodyAPI(prim):
+            articulation_root_prim = prim
+            break
+    if articulation_root_prim is None:
+        # Fallback: apply to the default prim
+        articulation_root_prim = stage.GetDefaultPrim()
+    if articulation_root_prim and articulation_root_prim.IsValid():
+        UsdPhysics.ArticulationRootAPI.Apply(articulation_root_prim)
+        PhysxSchema.PhysxArticulationAPI.Apply(articulation_root_prim)
+        stage.GetRootLayer().Save()
+        print(f"[articulation] Applied ArticulationRootAPI to "
+              f"<{articulation_root_prim.GetPath()}>")
+    else:
+        print("[warn] Could not find a prim to apply ArticulationRootAPI — "
+              "apply it manually in USD Composer if needed.")
+
+    print(f"[done]    -> {actual_usd_path}\n")
 
 
 def batch_convert(directory: str) -> None:

@@ -10,7 +10,10 @@
 
 default:
   scale: 0.001
-  make_instanceable: true
+  # make_instanceable is disabled here: both assets share the same Props/ directory,
+  # so batch-conversion would overwrite each other's instanceable_meshes.usd.
+  # Keep make_instanceable: false until each asset is given its own sub-directory.
+  make_instanceable: false
   collision_approximation: convexDecomposition
 
 assets:

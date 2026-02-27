@@ -57,6 +57,9 @@ def get_held_base_pos_local(task_name, fixed_asset_cfg, num_envs, device):
         held_base_z_offset = gear_base_offset[2]
     elif task_name == "nut_thread":
         held_base_z_offset = fixed_asset_cfg.base_height
+    elif task_name == "box_lid_insert":
+        # Lid body bottom is ~18.8 mm above the USD origin (STL Z_min after 0.001 scale).
+        held_base_z_offset = 0.0188
     else:
         raise NotImplementedError("Task not implemented")
 
@@ -92,6 +95,10 @@ def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg,
         shank_length = fixed_asset_cfg.height
         thread_pitch = fixed_asset_cfg.thread_pitch
         fixed_success_pos_local[:, 2] = head_height + shank_length - thread_pitch * 1.5
+    elif task_name == "box_lid_insert":
+        # Target: lid bottom face should reach the top of the box.
+        # fixed_asset_cfg.height = box height = 0.030 m.
+        fixed_success_pos_local[:, 2] = fixed_asset_cfg.height
     else:
         raise NotImplementedError("Task not implemented")
     fixed_success_quat_local = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).repeat(num_envs, 1)

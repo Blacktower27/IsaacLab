@@ -362,7 +362,7 @@ class FactoryEnv(DirectRLEnv):
         is_centered = torch.where(xy_dist < 0.0025, torch.ones_like(curr_successes), torch.zeros_like(curr_successes))
         # Height threshold to target
         fixed_cfg = self.cfg_task.fixed_asset_cfg
-        if self.cfg_task.name == "peg_insert" or self.cfg_task.name == "gear_mesh":
+        if self.cfg_task.name in ("peg_insert", "gear_mesh", "box_lid_insert"):
             height_threshold = fixed_cfg.height * success_threshold
         elif self.cfg_task.name == "nut_thread":
             height_threshold = fixed_cfg.thread_pitch * success_threshold
@@ -566,20 +566,35 @@ class FactoryEnv(DirectRLEnv):
             held_asset_relative_pos = factory_utils.get_held_base_pos_local(
                 self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
             )
+        elif self.cfg_task.name == "box_lid_insert":
+            held_asset_relative_pos = torch.zeros((self.num_envs, 3), device=self.device)
+            # Offset EE so finger pads align with the top of the lid handle.
+            # handle top = 0.055 m from USD origin; fingerpad_length = 0.0176 m
+            held_asset_relative_pos[:, 2] = (
+                self.cfg_task.held_asset_cfg.height - self.cfg_task.robot_cfg.franka_fingerpad_length
+            )
+            pos_offset = torch.tensor(self.cfg_task.held_asset_pos_offset, device=self.device)
+            held_asset_relative_pos += pos_offset.unsqueeze(0)
         else:
             raise NotImplementedError("Task not implemented")
 
         held_asset_relative_quat = (
             torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         )
-        if self.cfg_task.name == "nut_thread":
+        if self.cfg_task.name in ("nut_thread", "box_lid_insert"):
             # Rotate along z-axis of frame for default position.
             initial_rot_deg = self.cfg_task.held_asset_rot_init
-            rot_yaw_euler = torch.tensor([0.0, 0.0, initial_rot_deg * np.pi / 180.0], device=self.device).repeat(
-                self.num_envs, 1
-            )
+            rot_offset = getattr(self.cfg_task, "held_asset_rot_offset", [0.0, 0.0, 0.0])
+            rot_euler = torch.tensor(
+                [
+                    rot_offset[0] * np.pi / 180.0,  # roll
+                    rot_offset[1] * np.pi / 180.0,  # pitch
+                    (initial_rot_deg + rot_offset[2]) * np.pi / 180.0,  # yaw
+                ],
+                device=self.device,
+            ).repeat(self.num_envs, 1)
             held_asset_relative_quat = torch_utils.quat_from_euler_xyz(
-                roll=rot_yaw_euler[:, 0], pitch=rot_yaw_euler[:, 1], yaw=rot_yaw_euler[:, 2]
+                roll=rot_euler[:, 0], pitch=rot_euler[:, 1], yaw=rot_euler[:, 2]
             )
 
         return held_asset_relative_pos, held_asset_relative_quat
@@ -759,12 +774,18 @@ class FactoryEnv(DirectRLEnv):
             q1=fingertip_flipped_quat, t1=fingertip_flipped_pos, q2=asset_in_hand_quat, t2=asset_in_hand_pos
         )
 
+
+        # DEBUG: pause before closing gripper so you can inspect object placement.
+        # Set _DEBUG_OBSERVE_S = 0.0 to disable.
+        
         # Add asset in hand randomization
-        rand_sample = torch.rand((self.num_envs, 3), dtype=torch.float32, device=self.device)
-        held_asset_pos_noise = 2 * (rand_sample - 0.5)  # [-1, 1]
+        # rand_sample = torch.rand((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        # held_asset_pos_noise = 2 * (rand_sample - 0.5)  # [-1, 1]
+        rand_sample = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        held_asset_pos_noise = 2 * (rand_sample)  # [-1, 1]
         if self.cfg_task.name == "gear_mesh":
             held_asset_pos_noise[:, 2] = -rand_sample[:, 2]  # [-1, 0]
-
+    
         held_asset_pos_noise_level = torch.tensor(self.cfg_task.held_asset_pos_noise, device=self.device)
         held_asset_pos_noise = held_asset_pos_noise @ torch.diag(held_asset_pos_noise_level)
         translated_held_asset_quat, translated_held_asset_pos = torch_utils.tf_combine(
@@ -782,6 +803,17 @@ class FactoryEnv(DirectRLEnv):
         self._held_asset.write_root_velocity_to_sim(held_state[:, 7:])
         self._held_asset.reset()
 
+        # print("Debug observe...")
+        # _DEBUG_OBSERVE_S = 5.0
+        # _t = 0.0
+        # while _t < _DEBUG_OBSERVE_S:
+        #     self.scene.write_data_to_sim()
+        #     self.sim.step(render=True)  # render=True prevents Fabric clone failure
+        #     self.scene.update(dt=self.physics_dt)
+        #     self._compute_intermediate_values(dt=self.physics_dt)
+        #     _t += self.sim.get_physics_dt()
+        # print("Done observing, closing gripper...")
+
         #  Close hand
         # Set gains to use for quick resets.
         reset_task_prop_gains = torch.tensor(self.cfg.ctrl.reset_task_prop_gains, device=self.device).repeat(
@@ -793,6 +825,7 @@ class FactoryEnv(DirectRLEnv):
         )
 
         self.step_sim_no_action()
+
 
         grasp_time = 0.0
         while grasp_time < 0.25:

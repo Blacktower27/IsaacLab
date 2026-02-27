@@ -11,7 +11,7 @@ from isaaclab.utils import configclass
 from isaaclab_tasks.direct.factory.factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, CtrlCfg, FactoryEnvCfg, ObsRandCfg
 
 from .forge_events import randomize_dead_zone
-from .forge_tasks_cfg import ForgeGearMesh, ForgeNutThread, ForgePegInsert, ForgeTask
+from .forge_tasks_cfg import ForgeBoxLidInsert, ForgeGearMesh, ForgeNutThread, ForgePegInsert, ForgeTask
 
 OBS_DIM_CFG.update({"force_threshold": 1, "ft_force": 3})
 
@@ -148,3 +148,10 @@ class ForgeTaskNutThreadCfg(ForgeEnvCfg):
     task_name = "nut_thread"
     task = ForgeNutThread()
     episode_length_s = 30.0
+
+
+@configclass
+class ForgeTaskBoxLidInsertCfg(ForgeEnvCfg):
+    task_name = "box_lid_insert"
+    task = ForgeBoxLidInsert()
+    episode_length_s = 15.0
