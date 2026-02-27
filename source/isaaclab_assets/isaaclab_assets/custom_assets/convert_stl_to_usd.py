@@ -31,6 +31,11 @@ conversion_config.yaml format:
         collision_approximation: convexHull
 """
 
+"""
+./isaaclab.sh -p source/isaaclab_assets/isaaclab_assets/custom_assets/convert_stl_to_usd.py source/isaaclab_assets/isaaclab_assets/custom_assets/box/middle/Small_Box.stl
+./isaaclab.sh -p source/isaaclab_assets/isaaclab_assets/custom_assets/convert_stl_to_usd.py source/isaaclab_assets/isaaclab_assets/custom_assets/box/middle/Lid_Yellow.stl
+"""
+
 import argparse
 import os
 
@@ -141,6 +146,16 @@ def resolve_asset_cfg(fname: str, dir_cfg: dict) -> dict:
             "collision_approximation", args_cli.collision_approximation
         ),
         "mass": merged.get("mass", args_cli.mass),
+        # Collision contact/rest offsets (None → PhysX default)
+        "contact_offset": merged.get("contact_offset", None),
+        "rest_offset": merged.get("rest_offset", None),
+        # ConvexDecomposition precision params (None → PhysX default)
+        "hull_vertex_limit": merged.get("hull_vertex_limit", None),
+        "max_convex_hulls": merged.get("max_convex_hulls", None),
+        "voxel_resolution": merged.get("voxel_resolution", None),
+        "error_percentage": merged.get("error_percentage", None),
+        "shrink_wrap": merged.get("shrink_wrap", None),
+        "min_thickness": merged.get("min_thickness", None),
     }
 
 
@@ -166,10 +181,31 @@ def convert_one(stl_path: str, usd_path: str, cfg: dict) -> None:
         schemas_cfg.RigidBodyPropertiesCfg() if mass_props is not None else None
     )
     collision_props = schemas_cfg.CollisionPropertiesCfg(
-        collision_enabled=(collision_approx != "none")
+        collision_enabled=(collision_approx != "none"),
+        contact_offset=cfg.get("contact_offset"),
+        rest_offset=cfg.get("rest_offset"),
     )
     cfg_cls = _COLLISION_CFG_MAP[collision_approx]
-    collision_cfg = cfg_cls() if cfg_cls is not None else None
+    if cfg_cls is None:
+        collision_cfg = None
+    elif cfg_cls is schemas_cfg.ConvexDecompositionPropertiesCfg:
+        # Build kwargs, omitting keys that are None so PhysX defaults are preserved
+        # for any parameter the user did not explicitly set.
+        cd_kwargs = {
+            k: cfg[k]
+            for k in (
+                "hull_vertex_limit",
+                "max_convex_hulls",
+                "voxel_resolution",
+                "error_percentage",
+                "shrink_wrap",
+                "min_thickness",
+            )
+            if cfg.get(k) is not None
+        }
+        collision_cfg = cfg_cls(**cd_kwargs)
+    else:
+        collision_cfg = cfg_cls()
 
     mesh_cfg = MeshConverterCfg(
         asset_path=stl_path,
@@ -188,6 +224,17 @@ def convert_one(stl_path: str, usd_path: str, cfg: dict) -> None:
     print(f"          scale={scale}, mass={mass_val} kg, "
           f"collision={collision_approx}, "
           f"instanceable={cfg['make_instanceable']}")
+    if collision_approx == "convexDecomposition":
+        cd_info = {k: cfg[k] for k in
+                   ("hull_vertex_limit", "max_convex_hulls", "voxel_resolution",
+                    "error_percentage", "shrink_wrap", "min_thickness")
+                   if cfg.get(k) is not None}
+        if cd_info:
+            print(f"          convexDecomp params: {cd_info}")
+    contact_info = {k: cfg[k] for k in ("contact_offset", "rest_offset")
+                    if cfg.get(k) is not None}
+    if contact_info:
+        print(f"          collision offsets: {contact_info}")
     converter = MeshConverter(mesh_cfg)
 
     # Apply ArticulationRootAPI so IsaacLab's ArticulationCfg can load this USD.

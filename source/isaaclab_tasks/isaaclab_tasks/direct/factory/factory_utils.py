@@ -58,8 +58,16 @@ def get_held_base_pos_local(task_name, fixed_asset_cfg, num_envs, device):
     elif task_name == "nut_thread":
         held_base_z_offset = fixed_asset_cfg.base_height
     elif task_name == "box_lid_insert":
-        # Lid body bottom is ~18.8 mm above the USD origin (STL Z_min after 0.001 scale).
-        held_base_z_offset = 0.0188
+        # [CUSTOM] The lid's USD prim origin (0,0,0) does NOT coincide with the
+        # geometric bottom of the lid body.  In the original STL the body starts
+        # at Z_min = 18.8 mm, so after the 0.001 m/mm scale the bottom face is
+        # 0.0188 m above the USD origin.
+        #
+        # Shifting by this offset transforms the tracked "held base" position from
+        # the USD root frame to the true bottom contact face of the lid, which is
+        # the surface that must reach the box top for a successful insertion.
+        # This value is also stored in LidYellowCfg.base_height for reference.
+        held_base_z_offset = 0.0188  # = LidYellowCfg.base_height
     else:
         raise NotImplementedError("Task not implemented")
 
@@ -96,9 +104,14 @@ def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg,
         thread_pitch = fixed_asset_cfg.thread_pitch
         fixed_success_pos_local[:, 2] = head_height + shank_length - thread_pitch * 1.5
     elif task_name == "box_lid_insert":
-        # Target: lid bottom face should reach the top of the box.
-        # fixed_asset_cfg.height = box height = 0.030 m.
-        fixed_success_pos_local[:, 2] = fixed_asset_cfg.height
+        # [CUSTOM] The success target for the lid is the TOP FACE of the box.
+        # In the box's local coordinate frame (USD origin at box base, Z pointing
+        # up), the top face is at Z = fixed_asset_cfg.height = 0.030 m.
+        #
+        # Combined with get_held_base_pos_local (which tracks the lid bottom face),
+        # this means success = lid bottom face is at the same world-Z as box top
+        # face, i.e. the lid is fully seated on the box.
+        fixed_success_pos_local[:, 2] = fixed_asset_cfg.height  # = SmallBoxCfg.height = 0.030 m
     else:
         raise NotImplementedError("Task not implemented")
     fixed_success_quat_local = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).repeat(num_envs, 1)

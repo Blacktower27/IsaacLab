@@ -2,25 +2,60 @@
 # Used by: custom_assets/convert_stl_to_usd.py
 #
 # scale: STL source files are in mm → 0.001 converts to meters
+#
 # collision_approximation options:
-#   convexDecomposition  - multiple convex hulls, best for complex/concave shapes
+#   convexDecomposition  - multiple convex hulls, best for dynamic/concave shapes
 #   convexHull           - single convex hull, fast but less accurate
-#   triangleMesh         - exact mesh collision, expensive (avoid for dynamic objects)
+#   triangleMesh         - exact mesh collision (static/kinematic bodies only)
+#   sdf                  - signed-distance-field, very accurate for both static & dynamic
 #   none                 - no collision mesh
+#
+# contact_offset: distance at which PhysX generates contact constraints (metres).
+#   PhysX default ≈ 0.02 m (20 mm) — way too large for precision insertion tasks.
+#   Set to ~0.001 m for tight-fitting parts.
+# rest_offset: separation maintained at rest (metres). Default = 0.
+#   Keep at 0.0 for insertion tasks; negative values allow deeper "penetration".
+#
+# ConvexDecomposition precision params (only used when collision_approximation:
+# convexDecomposition):
+#   error_percentage    - max allowed shape error %; PhysX default = 10 (coarse!).
+#                         Lower = more accurate; 1–2 % is good for precision parts.
+#   hull_vertex_limit   - vertices per convex hull; PhysX default = 64.
+#                         Increase to 256 for smoother, better-fitting hulls.
+#   max_convex_hulls    - number of hulls; PhysX default = 32.
+#   voxel_resolution    - voxel count for decomposition; PhysX default = 500000.
+#   shrink_wrap         - project hull points onto actual mesh surface; default False.
+#                         Set true to reduce hull overshoot.
+#   min_thickness       - minimum hull thickness (m); PhysX default = 0.001.
 
 default:
   scale: 0.001
-  # make_instanceable is disabled here: both assets share the same Props/ directory,
+  # make_instanceable is disabled: both assets share the same Props/ directory,
   # so batch-conversion would overwrite each other's instanceable_meshes.usd.
-  # Keep make_instanceable: false until each asset is given its own sub-directory.
+  # Keep false until each asset is given its own sub-directory.
   make_instanceable: false
-  collision_approximation: convexDecomposition
+  collision_approximation: sdf
+  contact_offset: 0.001
+  rest_offset: 0.0
 
 assets:
   Small_Box.stl:
     mass: 0.1
-    collision_approximation: convexDecomposition
+    # The box is a fixed/static asset on the table — triangleMesh gives exact
+    # collision geometry for the inner cavity, critical for lid-insertion accuracy.
+    # (triangleMesh is only valid for static/kinematic bodies, which Small_Box is.)
+    collision_approximation: sdf
 
   Lid_Yellow.stl:
     mass: 0.02
-    collision_approximation: convexDecomposition
+    # Dynamic (held) asset → convexDecomposition required.
+    # Tightened precision params vs. PhysX defaults:
+    #   error_percentage : 10 % (default) → 1 % (much tighter fit)
+    #   hull_vertex_limit: 64  (default) → 256 (smoother hulls)
+    #   max_convex_hulls : 32  (default) → 64  (finer decomposition)
+    #   shrink_wrap      : false→ true (hull vertices snap to actual surface)
+    collision_approximation: sdf
+    error_percentage: 1.0
+    hull_vertex_limit: 256
+    max_convex_hulls: 64
+    shrink_wrap: true
