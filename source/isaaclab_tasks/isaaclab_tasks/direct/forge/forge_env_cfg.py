@@ -150,6 +150,17 @@ class ForgeTaskNutThreadCfg(ForgeEnvCfg):
     episode_length_s = 30.0
 
 
+# ---------------------------------------------------------------------------
+# [CUSTOM] Environment config for the box-lid insertion task.
+#
+# Registered as gym ID: Isaac-Forge-BoxLidInsert-Direct-v0
+# (see forge/__init__.py).
+#
+# episode_length_s = 15 s matches ForgeBoxLidInsert.duration_s.  The lid
+# insertion is a shorter-horizon task than nut threading (30 s) but needs
+# more time than peg insertion (10 s) because the box can be randomly rotated
+# up to 360° and the policy must first align the lid before descending.
+# ---------------------------------------------------------------------------
 @configclass
 class ForgeTaskBoxLidInsertCfg(ForgeEnvCfg):
     task_name = "box_lid_insert"

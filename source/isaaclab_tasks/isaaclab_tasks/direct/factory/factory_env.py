@@ -362,6 +362,11 @@ class FactoryEnv(DirectRLEnv):
         is_centered = torch.where(xy_dist < 0.0025, torch.ones_like(curr_successes), torch.zeros_like(curr_successes))
         # Height threshold to target
         fixed_cfg = self.cfg_task.fixed_asset_cfg
+        # [CUSTOM] "box_lid_insert" uses the same height-fraction formula as
+        # "peg_insert" and "gear_mesh": threshold = fixed_asset height × success_threshold.
+        # For box_lid_insert: 0.030 m × 0.04 = 0.0012 m = 1.2 mm.
+        # The lid bottom face must be within 1.2 mm of the box top face vertically
+        # AND within 2.5 mm horizontally (xy_dist < 0.0025) to count as success.
         if self.cfg_task.name in ("peg_insert", "gear_mesh", "box_lid_insert"):
             height_threshold = fixed_cfg.height * success_threshold
         elif self.cfg_task.name == "nut_thread":
@@ -567,12 +572,24 @@ class FactoryEnv(DirectRLEnv):
                 self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
             )
         elif self.cfg_task.name == "box_lid_insert":
+            # [CUSTOM] Compute the default EE → lid transform so that the Franka
+            # finger pads are centred on the lid handle when the gripper closes.
+            #
+            # Step 1 — Z offset along the (flipped) fingertip Z axis:
+            #   The finger pads grip the handle at the handle TOP.
+            #   Handle top height from USD origin = held_asset_cfg.height = 0.055 m.
+            #   Franka finger pad centre is franka_fingerpad_length = 0.0176 m below
+            #   the fingertip frame origin.
+            #   ∴ Z offset = 0.055 − 0.0176 = 0.0374 m
+            #   (i.e. the asset origin is 37.4 mm "below" the fingertip in Z).
             held_asset_relative_pos = torch.zeros((self.num_envs, 3), device=self.device)
-            # Offset EE so finger pads align with the top of the lid handle.
-            # handle top = 0.055 m from USD origin; fingerpad_length = 0.0176 m
             held_asset_relative_pos[:, 2] = (
                 self.cfg_task.held_asset_cfg.height - self.cfg_task.robot_cfg.franka_fingerpad_length
             )
+            # Step 2 — Fine-tune with held_asset_pos_offset [x, y, z] (metres).
+            #   This is a per-task empirical offset tuned to keep the handle
+            #   centred between the pads after the gripper closes.
+            #   Default = [0, 0.02, 0.005]: 20 mm inward along Y, 5 mm along Z.
             pos_offset = torch.tensor(self.cfg_task.held_asset_pos_offset, device=self.device)
             held_asset_relative_pos += pos_offset.unsqueeze(0)
         else:
@@ -581,6 +598,14 @@ class FactoryEnv(DirectRLEnv):
         held_asset_relative_quat = (
             torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         )
+        # [CUSTOM] "box_lid_insert" uses the same initial orientation logic as
+        # "nut_thread": apply held_asset_rot_init (base yaw) plus held_asset_rot_offset
+        # (additional roll/pitch/yaw) to orient the lid in the gripper frame.
+        #
+        # For box_lid_insert the defaults are:
+        #   held_asset_rot_init  = 90°  yaw  — aligns lid long axis with robot approach
+        #   held_asset_rot_offset = [0°, 35°, 0°]  — 35° pitch tilts the handle
+        #                            forward so the body clears the finger pads.
         if self.cfg_task.name in ("nut_thread", "box_lid_insert"):
             # Rotate along z-axis of frame for default position.
             initial_rot_deg = self.cfg_task.held_asset_rot_init
