@@ -191,13 +191,15 @@ class ForgeBoxLidInsert(ForgeTask):
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
-    # success_threshold is a FRACTION of the fixed asset height used by
-    # _get_curr_successes.  0.04 × 0.030 m = 1.2 mm: the lid bottom must be
-    # within 1.2 mm of the box top for the episode to count as successful.
+    # success_threshold < 0.5  → _get_curr_successes uses snap-fit CLIP ENGAGEMENT check
+    #   (success_threshold value itself is unused in that branch).
+    # engage_threshold  >= 0.5 → _get_curr_successes uses Z-distance height-fraction check:
+    #   height_threshold = fixed_asset.height × engage_threshold = 0.030 × 0.9 = 0.027 m.
+    #   curr_engaged fires when lid base is within 27 mm of the assembled Z target AND
+    #   XY-centred within 2.5 mm, i.e. approximately when the lid body starts entering
+    #   the box cavity. This provides an intermediate reward gradient between the dense
+    #   keypoint reward and the sparse clip-engagement success bonus.
     success_threshold: float = 0.04
-    # engage_threshold is a looser fraction used for the "engaged" partial reward.
-    # 0.9 × 0.030 m = 27 mm: the lid is "engaged" once it is within 27 mm of
-    # the box top, i.e. hovering just above or starting to enter the cavity.
     engage_threshold: float = 0.9
 
     # --- Scene assets ---

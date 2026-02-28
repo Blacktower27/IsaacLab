@@ -104,14 +104,21 @@ def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg,
         thread_pitch = fixed_asset_cfg.thread_pitch
         fixed_success_pos_local[:, 2] = head_height + shank_length - thread_pitch * 1.5
     elif task_name == "box_lid_insert":
-        # [CUSTOM] The success target for the lid is the TOP FACE of the box.
-        # In the box's local coordinate frame (USD origin at box base, Z pointing
-        # up), the top face is at Z = fixed_asset_cfg.height = 0.030 m.
+        # [CUSTOM] Snap-fit assembly geometry (values in metres, scale ×0.001):
         #
-        # Combined with get_held_base_pos_local (which tracks the lid bottom face),
-        # this means success = lid bottom face is at the same world-Z as box top
-        # face, i.e. the lid is fully seated on the box.
-        fixed_success_pos_local[:, 2] = fixed_asset_cfg.height  # = SmallBoxCfg.height = 0.030 m
+        # The lid slides INSIDE the box (not on top). When fully assembled the lid
+        # top plate (STL Z=30 mm) is flush with the box top face (STL Z=30 mm), so
+        # both USD origins share the same world Z.  The snap clips (lid Z=26.5-28.5
+        # mm) engage in the front-wall pockets (box Z=20-29 mm) at that point.
+        #
+        # held_base tracks the lid BOTTOM face (0.0188 m above lid USD origin, see
+        # get_held_base_pos_local).  In assembled state lid origin = box origin, so
+        # lid bottom is at box-local Z = 0.0188 m (= LidYellowCfg.base_height).
+        #
+        # Previous value was fixed_asset_cfg.height = 0.030 m (box top), which fired
+        # when the lid was resting ON TOP of the box, not inserted inside it.
+        _LID_BASE_HEIGHT = 0.0188  # must match LidYellowCfg.base_height
+        fixed_success_pos_local[:, 2] = _LID_BASE_HEIGHT
     else:
         raise NotImplementedError("Task not implemented")
     fixed_success_quat_local = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).repeat(num_envs, 1)

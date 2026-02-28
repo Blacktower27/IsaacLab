@@ -14,7 +14,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab.utils.math import axis_angle_from_quat
+from isaaclab.utils.math import axis_angle_from_quat, quat_apply_inverse
 
 from . import factory_control, factory_utils
 from .factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, FactoryEnvCfg
@@ -360,23 +360,92 @@ class FactoryEnv(DirectRLEnv):
         z_disp = held_base_pos[:, 2] - target_held_base_pos[:, 2]
 
         is_centered = torch.where(xy_dist < 0.0025, torch.ones_like(curr_successes), torch.zeros_like(curr_successes))
-        # Height threshold to target
         fixed_cfg = self.cfg_task.fixed_asset_cfg
-        # [CUSTOM] "box_lid_insert" uses the same height-fraction formula as
-        # "peg_insert" and "gear_mesh": threshold = fixed_asset height × success_threshold.
-        # For box_lid_insert: 0.030 m × 0.04 = 0.0012 m = 1.2 mm.
-        # The lid bottom face must be within 1.2 mm of the box top face vertically
-        # AND within 2.5 mm horizontally (xy_dist < 0.0025) to count as success.
-        if self.cfg_task.name in ("peg_insert", "gear_mesh", "box_lid_insert"):
+        if self.cfg_task.name in ("peg_insert", "gear_mesh"):
             height_threshold = fixed_cfg.height * success_threshold
+            is_close_or_below = torch.where(
+                z_disp < height_threshold, torch.ones_like(curr_successes), torch.zeros_like(curr_successes)
+            )
+            curr_successes = torch.logical_and(is_centered, is_close_or_below)
         elif self.cfg_task.name == "nut_thread":
             height_threshold = fixed_cfg.thread_pitch * success_threshold
+            is_close_or_below = torch.where(
+                z_disp < height_threshold, torch.ones_like(curr_successes), torch.zeros_like(curr_successes)
+            )
+            curr_successes = torch.logical_and(is_centered, is_close_or_below)
+        elif self.cfg_task.name == "box_lid_insert":
+            # Snap-fit clip engagement check — same code path for success and engaged.
+            # Tolerances scale with success_threshold so a single implementation covers
+            # both tight (success) and loose (engaged) calls:
+            #   success_threshold = 0.04 → tol_scale = 1.0  → ±2 mm XY, Z [0.021,0.029]
+            #   engage_threshold  = 0.9  → tol_scale = 22.5 → ±20 mm XY, Z [0.0, 0.030]
+            #
+            # Box STL — pocket geometry (box local frame, metres):
+            #   Left  pocket X centre = -0.025218, Right pocket X centre = +0.024250
+            #   Clip outer face Y = -0.0444; pocket Z window centre = 0.025, half = 0.004
+            #
+            # Lid STL — clip geometry (lid local frame, metres):
+            #   Clip X centres match pocket centres; tooth top Z = 0.0289, Y = -0.0444.
+            tol_scale = success_threshold / 0.04
+            ident_q = (
+                torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+                .unsqueeze(0)
+                .expand(self.num_envs, -1)
+            )
+
+            # Clip tooth reference points in lid local frame (from lid STL).
+            left_clip_local = torch.zeros((self.num_envs, 3), device=self.device)
+            left_clip_local[:, 0] = -0.025218  # left clip X centre
+            left_clip_local[:, 1] = -0.0444    # outer (front) face of clip
+            left_clip_local[:, 2] = 0.0289     # tooth top Z
+
+            right_clip_local = torch.zeros((self.num_envs, 3), device=self.device)
+            right_clip_local[:, 0] = 0.024250  # right clip X centre
+            right_clip_local[:, 1] = -0.0444   # outer (front) face of clip
+            right_clip_local[:, 2] = 0.0289    # tooth top Z
+
+            # Lid local → world frame.
+            _, left_clip_w = torch_utils.tf_combine(
+                self.held_quat, self.held_pos, ident_q, left_clip_local
+            )
+            _, right_clip_w = torch_utils.tf_combine(
+                self.held_quat, self.held_pos, ident_q, right_clip_local
+            )
+
+            # World → box local frame.
+            left_clip_box = quat_apply_inverse(self.fixed_quat, left_clip_w - self.fixed_pos)
+            right_clip_box = quat_apply_inverse(self.fixed_quat, right_clip_w - self.fixed_pos)
+
+            # Pocket centres (box STL) and scaled tolerances.
+            _LEFT_HOLE_X     = -0.025218
+            _RIGHT_HOLE_X    =  0.024250
+            _HOLE_WALL_Y     = -0.0444
+            _POCKET_Z_CENTRE =  0.025  # centre of Z window [0.021, 0.029]
+            # XY: ±2 mm at success, capped at ±20 mm for engaged.
+            _HOLE_X_TOL = min(0.002 * tol_scale, 0.020)
+            _HOLE_Y_TOL = min(0.002 * tol_scale, 0.020)
+            # Z: ±4 mm half-width at success, widens to full box height for engaged.
+            _z_half       = min(0.004 * tol_scale, 0.025)
+            _POCKET_Z_MIN = max(0.0,              _POCKET_Z_CENTRE - _z_half)
+            _POCKET_Z_MAX = min(fixed_cfg.height, _POCKET_Z_CENTRE + _z_half)
+
+            left_x_ok  = (left_clip_box[:,  0] - _LEFT_HOLE_X).abs()  < _HOLE_X_TOL
+            right_x_ok = (right_clip_box[:, 0] - _RIGHT_HOLE_X).abs() < _HOLE_X_TOL
+            left_y_ok  = (left_clip_box[:,  1] - _HOLE_WALL_Y).abs()  < _HOLE_Y_TOL
+            right_y_ok = (right_clip_box[:, 1] - _HOLE_WALL_Y).abs()  < _HOLE_Y_TOL
+            left_z_ok  = (left_clip_box[:,  2] > _POCKET_Z_MIN) & (left_clip_box[:,  2] < _POCKET_Z_MAX)
+            right_z_ok = (right_clip_box[:, 2] > _POCKET_Z_MIN) & (right_clip_box[:, 2] < _POCKET_Z_MAX)
+
+            curr_successes = (
+                left_x_ok & left_y_ok & left_z_ok & right_x_ok & right_y_ok & right_z_ok
+            )
         else:
             raise NotImplementedError("Task not implemented")
-        is_close_or_below = torch.where(
-            z_disp < height_threshold, torch.ones_like(curr_successes), torch.zeros_like(curr_successes)
-        )
-        curr_successes = torch.logical_and(is_centered, is_close_or_below)
+        
+        # is_close_or_below = torch.where(
+        #     z_disp < height_threshold, torch.ones_like(curr_successes), torch.zeros_like(curr_successes)
+        # )
+        # curr_successes = torch.logical_and(is_centered, is_close_or_below)
 
         if check_rot:
             _, _, curr_yaw = torch_utils.get_euler_xyz(self.fingertip_midpoint_quat)
