@@ -10,7 +10,7 @@ import carb
 import isaacsim.core.utils.torch as torch_utils
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -82,6 +82,12 @@ class FactoryEnv(DirectRLEnv):
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
 
+        # [CUSTOM] Per-episode keypoints for box_lid_insert (sampled once per reset).
+        if self.cfg_task.name == "box_lid_insert":
+            n = self.cfg_task.num_keypoints
+            self.kp_lid_local = torch.zeros((self.num_envs, n, 3), device=self.device)
+            self.kp_box_local = torch.zeros((self.num_envs, n, 3), device=self.device)
+
     def _setup_scene(self):
         """Initialize simulation scene."""
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -1.05))
@@ -93,7 +99,10 @@ class FactoryEnv(DirectRLEnv):
         )
 
         self._robot = Articulation(self.cfg.robot)
-        self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
+        if isinstance(self.cfg_task.fixed_asset, RigidObjectCfg):
+            self._fixed_asset = RigidObject(self.cfg_task.fixed_asset)
+        else:
+            self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
         self._held_asset = Articulation(self.cfg_task.held_asset)
         if self.cfg_task.name == "gear_mesh":
             self._small_gear_asset = Articulation(self.cfg_task.small_gear_cfg)
@@ -105,7 +114,10 @@ class FactoryEnv(DirectRLEnv):
             self.scene.filter_collisions()
 
         self.scene.articulations["robot"] = self._robot
-        self.scene.articulations["fixed_asset"] = self._fixed_asset
+        if isinstance(self._fixed_asset, RigidObject):
+            self.scene.rigid_objects["fixed_asset"] = self._fixed_asset
+        else:
+            self.scene.articulations["fixed_asset"] = self._fixed_asset
         self.scene.articulations["held_asset"] = self._held_asset
         if self.cfg_task.name == "gear_mesh":
             self.scene.articulations["small_gear"] = self._small_gear_asset
@@ -374,19 +386,20 @@ class FactoryEnv(DirectRLEnv):
             )
             curr_successes = torch.logical_and(is_centered, is_close_or_below)
         elif self.cfg_task.name == "box_lid_insert":
-            # Snap-fit clip engagement check — same code path for success and engaged.
-            # Tolerances scale with success_threshold so a single implementation covers
-            # both tight (success) and loose (engaged) calls:
-            #   success_threshold = 0.04 → tol_scale = 1.0  → ±2 mm XY, Z [0.021,0.029]
-            #   engage_threshold  = 0.9  → tol_scale = 22.5 → ±20 mm XY, Z [0.0, 0.030]
+            # Box STL pocket geometry (box local frame, metres):
+            #   Left  pocket centre X = -0.025218, Right pocket centre X = +0.024250
+            #   Pocket width (X) = 11 mm, height (Z) = [0.021, 0.029], depth (Y) = [-0.0495, -0.0375]
+            #   Groove mouth at Y = -0.0375, back wall at Y = -0.0495
+            #   45° chamfers at groove mouth guide clip entry
+            # Lid STL clip geometry (lid local frame, metres):
+            #   Clip X centres match pocket centres; tooth top Z = 0.0289, outer face Y = -0.0444
             #
-            # Box STL — pocket geometry (box local frame, metres):
-            #   Left  pocket X centre = -0.025218, Right pocket X centre = +0.024250
-            #   Clip outer face Y = -0.0444; pocket Z window centre = 0.025, half = 0.004
-            #
-            # Lid STL — clip geometry (lid local frame, metres):
-            #   Clip X centres match pocket centres; tooth top Z = 0.0289, Y = -0.0444.
-            tol_scale = success_threshold / 0.04
+            # Two distinct checks dispatched by success_threshold value:
+            #   engage_threshold  = 0.9  → engaged:  X aligned, clip inside groove (Y), Z reasonable
+            #   success_threshold = 0.04 → success:  X + Y at front wall + Z in pocket window
+            _LEFT_HOLE_X  = -0.025218
+            _RIGHT_HOLE_X =  0.024250
+
             ident_q = (
                 torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
                 .unsqueeze(0)
@@ -395,46 +408,54 @@ class FactoryEnv(DirectRLEnv):
 
             # Clip tooth reference points in lid local frame (from lid STL).
             left_clip_local = torch.zeros((self.num_envs, 3), device=self.device)
-            left_clip_local[:, 0] = -0.025218  # left clip X centre
-            left_clip_local[:, 1] = -0.0444    # outer (front) face of clip
-            left_clip_local[:, 2] = 0.0289     # tooth top Z
+            left_clip_local[:, 0] = -0.025218
+            left_clip_local[:, 1] = -0.0444
+            left_clip_local[:, 2] = 0.0289
 
             right_clip_local = torch.zeros((self.num_envs, 3), device=self.device)
-            right_clip_local[:, 0] = 0.024250  # right clip X centre
-            right_clip_local[:, 1] = -0.0444   # outer (front) face of clip
-            right_clip_local[:, 2] = 0.0289    # tooth top Z
+            right_clip_local[:, 0] = 0.024250
+            right_clip_local[:, 1] = -0.0444
+            right_clip_local[:, 2] = 0.0289
 
-            # Lid local → world frame.
-            _, left_clip_w = torch_utils.tf_combine(
-                self.held_quat, self.held_pos, ident_q, left_clip_local
-            )
-            _, right_clip_w = torch_utils.tf_combine(
-                self.held_quat, self.held_pos, ident_q, right_clip_local
-            )
-
-            # World → box local frame.
-            left_clip_box = quat_apply_inverse(self.fixed_quat, left_clip_w - self.fixed_pos)
+            # Lid local → world → box local frame.
+            _, left_clip_w  = torch_utils.tf_combine(self.held_quat, self.held_pos, ident_q, left_clip_local)
+            _, right_clip_w = torch_utils.tf_combine(self.held_quat, self.held_pos, ident_q, right_clip_local)
+            left_clip_box  = quat_apply_inverse(self.fixed_quat, left_clip_w  - self.fixed_pos)
             right_clip_box = quat_apply_inverse(self.fixed_quat, right_clip_w - self.fixed_pos)
 
-            # Pocket centres (box STL) and scaled tolerances.
-            _LEFT_HOLE_X     = -0.025218
-            _RIGHT_HOLE_X    =  0.024250
-            _HOLE_WALL_Y     = -0.0444
-            _POCKET_Z_CENTRE =  0.025  # centre of Z window [0.021, 0.029]
-            # XY: ±2 mm at success, capped at ±20 mm for engaged.
-            _HOLE_X_TOL = min(0.002 * tol_scale, 0.020)
-            _HOLE_Y_TOL = min(0.002 * tol_scale, 0.020)
-            # Z: ±4 mm half-width at success, widens to full box height for engaged.
-            _z_half       = min(0.004 * tol_scale, 0.025)
-            _POCKET_Z_MIN = max(0.0,              _POCKET_Z_CENTRE - _z_half)
-            _POCKET_Z_MAX = min(fixed_cfg.height, _POCKET_Z_CENTRE + _z_half)
+            if success_threshold >= 0.5:
+                # Engaged: clips are X-aligned AND inside the groove (Y) AND at a
+                # reasonable height (Z). Z upper bound is relaxed above the box top so
+                # the policy gets a signal while the lid is still descending from above.
+                #   X: ±2 mm — groove entry needs correct alignment (chamfers only 1 mm wide)
+                #   Y: [-49.5, -37.5] mm — clip is inside the groove (mouth → back wall)
+                #   Z: [18, 35] mm — groove floor (21 mm) with tolerance, up to 5 mm above box
+                _X_TOL = 0.002
+                _Y_MIN, _Y_MAX = -0.0495,  0.035
+                _Z_MIN, _Z_MAX =  0.024,   0.030
 
-            left_x_ok  = (left_clip_box[:,  0] - _LEFT_HOLE_X).abs()  < _HOLE_X_TOL
-            right_x_ok = (right_clip_box[:, 0] - _RIGHT_HOLE_X).abs() < _HOLE_X_TOL
-            left_y_ok  = (left_clip_box[:,  1] - _HOLE_WALL_Y).abs()  < _HOLE_Y_TOL
-            right_y_ok = (right_clip_box[:, 1] - _HOLE_WALL_Y).abs()  < _HOLE_Y_TOL
-            left_z_ok  = (left_clip_box[:,  2] > _POCKET_Z_MIN) & (left_clip_box[:,  2] < _POCKET_Z_MAX)
-            right_z_ok = (right_clip_box[:, 2] > _POCKET_Z_MIN) & (right_clip_box[:, 2] < _POCKET_Z_MAX)
+                left_x_ok  = (left_clip_box[:,  0] - _LEFT_HOLE_X).abs()  < _X_TOL
+                right_x_ok = (right_clip_box[:, 0] - _RIGHT_HOLE_X).abs() < _X_TOL
+                left_y_ok  = (left_clip_box[:,  1] > _Y_MIN) & (left_clip_box[:,  1] < _Y_MAX)
+                right_y_ok = (right_clip_box[:, 1] > _Y_MIN) & (right_clip_box[:, 1] < _Y_MAX)
+                left_z_ok  = (left_clip_box[:,  2] > _Z_MIN) & (left_clip_box[:,  2] < _Z_MAX)
+                right_z_ok = (right_clip_box[:, 2] > _Z_MIN) & (right_clip_box[:, 2] < _Z_MAX)
+            else:
+                # Success: clips fully seated in pocket — X + Y at front wall + Z in window.
+                #   X: ±2 mm from pocket centre
+                #   Y: ±2 mm from outer clip face / front wall (Y = -0.0444)
+                #   Z: [21, 29] mm — full pocket Z window
+                _X_TOL        = 0.002
+                _Y_TOL        = 0.002
+                _HOLE_WALL_Y  = -0.0444
+                _Z_MIN, _Z_MAX = 0.021, 0.029
+
+                left_x_ok  = (left_clip_box[:,  0] - _LEFT_HOLE_X).abs()  < _X_TOL
+                right_x_ok = (right_clip_box[:, 0] - _RIGHT_HOLE_X).abs() < _X_TOL
+                left_y_ok  = (left_clip_box[:,  1] - _HOLE_WALL_Y).abs()  < _Y_TOL
+                right_y_ok = (right_clip_box[:, 1] - _HOLE_WALL_Y).abs()  < _Y_TOL
+                left_z_ok  = (left_clip_box[:,  2] > _Z_MIN) & (left_clip_box[:,  2] < _Z_MAX)
+                right_z_ok = (right_clip_box[:, 2] > _Z_MIN) & (right_clip_box[:, 2] < _Z_MAX)
 
             curr_successes = (
                 left_x_ok & left_y_ok & left_z_ok & right_x_ok & right_y_ok & right_z_ok
@@ -499,36 +520,45 @@ class FactoryEnv(DirectRLEnv):
         """Compute reward terms at current timestep."""
         rew_dict, rew_scales = {}, {}
 
-        # Compute pos of keypoints on held asset, and fixed asset in world frame
-        held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
-            self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
-        )
-        target_held_base_pos, target_held_base_quat = factory_utils.get_target_held_base_pose(
-            self.fixed_pos,
-            self.fixed_quat,
-            self.cfg_task.name,
-            self.cfg_task.fixed_asset_cfg,
-            self.num_envs,
-            self.device,
-        )
-
-        keypoints_held = torch.zeros((self.num_envs, self.cfg_task.num_keypoints, 3), device=self.device)
-        keypoints_fixed = torch.zeros((self.num_envs, self.cfg_task.num_keypoints, 3), device=self.device)
-        offsets = factory_utils.get_keypoint_offsets(self.cfg_task.num_keypoints, self.device)
-        keypoint_offsets = offsets * self.cfg_task.keypoint_scale
-        for idx, keypoint_offset in enumerate(keypoint_offsets):
-            keypoints_held[:, idx] = torch_utils.tf_combine(
-                held_base_quat,
-                held_base_pos,
-                torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
-                keypoint_offset.repeat(self.num_envs, 1),
-            )[1]
-            keypoints_fixed[:, idx] = torch_utils.tf_combine(
-                target_held_base_quat,
-                target_held_base_pos,
-                torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
-                keypoint_offset.repeat(self.num_envs, 1),
-            )[1]
+        # Compute pos of keypoints on held asset, and fixed asset in world frame.
+        ident = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+        if self.cfg_task.name == "box_lid_insert":
+            # [CUSTOM] Use per-episode randomly sampled keypoints (fixed within episode).
+            # kp_lid_local and kp_box_local are identical because at the success pose
+            # the lid USD origin coincides with the box USD origin.
+            n = self.cfg_task.num_keypoints
+            keypoints_held  = torch.zeros((self.num_envs, n, 3), device=self.device)
+            keypoints_fixed = torch.zeros((self.num_envs, n, 3), device=self.device)
+            for i in range(n):
+                _, keypoints_held[:, i]  = torch_utils.tf_combine(
+                    self.held_quat,  self.held_pos,  ident, self.kp_lid_local[:, i]
+                )
+                _, keypoints_fixed[:, i] = torch_utils.tf_combine(
+                    self.fixed_quat, self.fixed_pos, ident, self.kp_box_local[:, i]
+                )
+        else:
+            held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
+                self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
+            )
+            target_held_base_pos, target_held_base_quat = factory_utils.get_target_held_base_pose(
+                self.fixed_pos,
+                self.fixed_quat,
+                self.cfg_task.name,
+                self.cfg_task.fixed_asset_cfg,
+                self.num_envs,
+                self.device,
+            )
+            keypoints_held  = torch.zeros((self.num_envs, self.cfg_task.num_keypoints, 3), device=self.device)
+            keypoints_fixed = torch.zeros((self.num_envs, self.cfg_task.num_keypoints, 3), device=self.device)
+            offsets = factory_utils.get_keypoint_offsets(self.cfg_task.num_keypoints, self.device)
+            keypoint_offsets = offsets * self.cfg_task.keypoint_scale
+            for idx, keypoint_offset in enumerate(keypoint_offsets):
+                keypoints_held[:, idx] = torch_utils.tf_combine(
+                    held_base_quat, held_base_pos, ident, keypoint_offset.repeat(self.num_envs, 1),
+                )[1]
+                keypoints_fixed[:, idx] = torch_utils.tf_combine(
+                    target_held_base_quat, target_held_base_pos, ident, keypoint_offset.repeat(self.num_envs, 1),
+                )[1]
         keypoint_dist = torch.norm(keypoints_held - keypoints_fixed, p=2, dim=-1).mean(-1)
 
         a0, b0 = self.cfg_task.keypoint_coef_baseline
@@ -568,6 +598,17 @@ class FactoryEnv(DirectRLEnv):
         self.step_sim_no_action()
 
         self.randomize_initial_state(env_ids)
+
+        # [CUSTOM] Sample random keypoints in lid body bounds for box_lid_insert.
+        # At success pose lid origin = box origin, so kp_box_local == kp_lid_local.
+        if self.cfg_task.name == "box_lid_insert":
+            n = self.cfg_task.num_keypoints
+            kp = torch.rand((len(env_ids), n, 3), device=self.device)
+            kp[:, :, 0] = kp[:, :, 0] * 0.1046 - 0.0523  # X: [-52.3, +52.3] mm
+            kp[:, :, 1] = kp[:, :, 1] * 0.0838 - 0.0444  # Y: [-44.4, +39.4] mm
+            kp[:, :, 2] = kp[:, :, 2] * 0.0112 + 0.0188  # Z: [+18.8, +30.0] mm
+            self.kp_lid_local[env_ids] = kp
+            self.kp_box_local[env_ids] = kp
 
     def _set_assets_to_default_pose(self, env_ids):
         """Move assets to default pose before randomization."""
@@ -795,6 +836,24 @@ class FactoryEnv(DirectRLEnv):
             above_fixed_pos_rand = above_fixed_pos_rand @ torch.diag(hand_init_pos_rand)
             above_fixed_pos[bad_envs] += above_fixed_pos_rand
 
+            # For box_lid_insert: apply XY from hand_init_pos in box-local frame.
+            # Rotating through fixed_quat makes the offset follow the box yaw.
+            if self.cfg_task.name == "box_lid_insert":
+                xy_local = torch.tensor(
+                    [self.cfg_task.hand_init_pos[0], self.cfg_task.hand_init_pos[1], 0.0],
+                    device=self.device,
+                ).unsqueeze(0).repeat(self.num_envs, 1)
+                identity = torch.tensor(
+                    [1.0, 0.0, 0.0, 0.0], device=self.device
+                ).unsqueeze(0).repeat(self.num_envs, 1)
+                _, xy_world = torch_utils.tf_combine(
+                    self.fixed_quat,
+                    torch.zeros((self.num_envs, 3), device=self.device),
+                    identity,
+                    xy_local,
+                )
+                above_fixed_pos += xy_world
+
             # (b) get random orientation facing down
             hand_down_euler = (
                 torch.tensor(self.cfg_task.hand_init_orn, device=self.device).unsqueeze(0).repeat(n_bad, 1)
@@ -805,6 +864,12 @@ class FactoryEnv(DirectRLEnv):
             hand_init_orn_rand = torch.tensor(self.cfg_task.hand_init_orn_noise, device=self.device)
             above_fixed_orn_noise = above_fixed_orn_noise @ torch.diag(hand_init_orn_rand)
             hand_down_euler += above_fixed_orn_noise
+
+            # For box_lid_insert: align gripper yaw with box yaw so clips always face pockets.
+            if self.cfg_task.name == "box_lid_insert":
+                _, _, box_yaw = torch_utils.get_euler_xyz(self.fixed_quat[bad_envs])
+                hand_down_euler[:, 2] = box_yaw - 0.5 * torch.pi
+
             hand_down_quat[bad_envs, :] = torch_utils.quat_from_euler_xyz(
                 roll=hand_down_euler[:, 0], pitch=hand_down_euler[:, 1], yaw=hand_down_euler[:, 2]
             )
@@ -868,8 +933,8 @@ class FactoryEnv(DirectRLEnv):
             q1=fingertip_flipped_quat, t1=fingertip_flipped_pos, q2=asset_in_hand_quat, t2=asset_in_hand_pos
         )
 
-
-        # DEBUG: pause before closing gripper so you can inspect object placement.
+        
+        
         # Set _DEBUG_OBSERVE_S = 0.0 to disable.
         
         # Add asset in hand randomization
@@ -897,8 +962,9 @@ class FactoryEnv(DirectRLEnv):
         self._held_asset.write_root_velocity_to_sim(held_state[:, 7:])
         self._held_asset.reset()
 
+        # DEBUG: pause before closing gripper so you can inspect object placement.
         # print("Debug observe...")
-        # _DEBUG_OBSERVE_S = 5.0
+        # _DEBUG_OBSERVE_S = 20.0
         # _t = 0.0
         # while _t < _DEBUG_OBSERVE_S:
         #     self.scene.write_data_to_sim()
