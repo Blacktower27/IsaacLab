@@ -80,8 +80,8 @@ _RIGHT_HOLE_TARGET = ( 0.024250, -0.0444, 0.025)
 # ---------------------------------------------------------------------------
 # Keyboard input  (event-subscription approach — more reliable than polling)
 # ---------------------------------------------------------------------------
-MOVE_STEP = 0.0002   # metres per frame (×5 when Shift held)
-ROT_STEP  = 0.003    # radians per frame
+MOVE_STEP = 0.001    # metres per frame (×5 when Shift held)
+ROT_STEP  = 0.01     # radians per frame
 SHIFT_MUL = 5.0
 
 Ki = carb.input.KeyboardInput
@@ -115,7 +115,7 @@ def _key(k) -> bool:
 # Interactive lid pose state (relative to the box, expressed in box local).
 # Reset (R key) brings these back to zero = exact success position.
 # ---------------------------------------------------------------------------
-_pos_offset  = [0.0, 0.0, 0.0]   # XYZ offset in world frame, metres
+_pos_offset  = [0.0, 0.0, 0.015]   # XYZ offset in world frame, metres
 _euler_offset = [0.0, 0.0, 0.0]  # [roll, pitch, yaw] offset, radians
 
 
@@ -197,6 +197,14 @@ def _get_markers() -> VisualizationMarkers:
                     radius=0.005,
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.2, 0.2)),
                 ),
+                "kp_held": sim_utils.SphereCfg(
+                    radius=0.003,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.9, 0.2)),
+                ),
+                "kp_target": sim_utils.SphereCfg(
+                    radius=0.003,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.8, 0.0)),
+                ),
             },
         )
         _markers = VisualizationMarkers(cfg)
@@ -226,14 +234,27 @@ def _draw_clip_hole_markers(inner):
     _, lh_env = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, lh_loc)
     _, rh_env = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, rh_loc)
 
-    translations = torch.cat(
-        [lc_env + env_orig, rc_env + env_orig, lh_env + env_orig, rh_env + env_orig], dim=0
-    )
-    identity_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(4 * num_envs, -1)
-    marker_indices = torch.cat([
+    # clip=0, hole=1
+    translations_list  = [lc_env + env_orig, rc_env + env_orig, lh_env + env_orig, rh_env + env_orig]
+    marker_indices_list = [
         torch.zeros(2 * num_envs, dtype=torch.int32),
         torch.ones( 2 * num_envs, dtype=torch.int32),
-    ])
+    ]
+
+    # Per-episode keypoints: kp_held (green=2), kp_target (yellow=3).
+    if hasattr(inner, "kp_lid_local"):
+        n = inner.kp_lid_local.shape[1]
+        for i in range(n):
+            _, kp_h = torch_utils.tf_combine(held_quat,  held_pos,  ident_q, inner.kp_lid_local[:, i])
+            _, kp_t = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, inner.kp_box_local[:, i])
+            translations_list.append(kp_h + env_orig)
+            translations_list.append(kp_t + env_orig)
+            marker_indices_list.append(torch.full((num_envs,), 2, dtype=torch.int32))  # kp_held
+            marker_indices_list.append(torch.full((num_envs,), 3, dtype=torch.int32))  # kp_target
+
+    translations   = torch.cat(translations_list,   dim=0)
+    marker_indices = torch.cat(marker_indices_list, dim=0)
+    identity_q     = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(len(translations), -1)
 
     markers.visualize(translations=translations, orientations=identity_q, marker_indices=marker_indices)
 
@@ -242,32 +263,37 @@ def _draw_clip_hole_markers(inner):
 # Success / failure rate tracking
 # ---------------------------------------------------------------------------
 _success_count  = 0   # cumulative steps where ANY env succeeded
+_engaged_count  = 0   # cumulative steps where ANY env was engaged (clips in groove)
 _total_count    = 0   # cumulative steps checked
-_recent_window: deque = deque(maxlen=100)  # rolling 100-step success fractions
+_recent_window:         deque = deque(maxlen=100)  # rolling 100-step success fractions
+_recent_engaged_window: deque = deque(maxlen=100)  # rolling 100-step engaged fractions
 
 
-def _track_success(successes: torch.Tensor):
+def _track_success(successes: torch.Tensor, engaged: torch.Tensor):
     """Call every step to update success-rate counters."""
-    global _success_count, _total_count
-    frac = successes.float().mean().item()   # fraction of envs in success this step
+    global _success_count, _engaged_count, _total_count
     _total_count   += 1
     _success_count += int(successes.any().item())
-    _recent_window.append(frac)
+    _engaged_count += int(engaged.any().item())
+    _recent_window.append(successes.float().mean().item())
+    _recent_engaged_window.append(engaged.float().mean().item())
 
 
 def _reset_rate_counters():
-    global _success_count, _total_count
+    global _success_count, _engaged_count, _total_count
     _success_count = 0
+    _engaged_count = 0
     _total_count   = 0
     _recent_window.clear()
+    _recent_engaged_window.clear()
 
 
 # ---------------------------------------------------------------------------
 # Success info print
 # ---------------------------------------------------------------------------
 
-def _print_success_info(inner, step, successes: torch.Tensor):
-    """Print clip positions, distances to hole targets, and success rates."""
+def _print_success_info(inner, step, successes: torch.Tensor, engaged: torch.Tensor):
+    """Print clip positions, distances to hole targets, and success/engaged rates."""
     device   = inner.device
     num_envs = inner.num_envs
     ident_q  = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(num_envs, -1)
@@ -306,18 +332,30 @@ def _print_success_info(inner, step, successes: torch.Tensor):
     def _fmt_dist(d, norm):
         return (f"ΔX={d[0]*1000:+5.1f} ΔY={d[1]*1000:+5.1f} ΔZ={d[2]*1000:+5.1f} |d|={norm:5.2f} mm")
 
-    # Success rate stats.
-    cumul_rate   = (_success_count / _total_count * 100) if _total_count > 0 else 0.0
-    recent_frac  = (sum(_recent_window) / len(_recent_window) * 100) if _recent_window else 0.0
-    success_str  = "SUCCESS" if successes[0].item() else "FAILURE"
+    # Status for env 0.
+    is_success = successes[0].item()
+    is_engaged = engaged[0].item()
+    if is_success:
+        state_str = "SUCCESS"
+    elif is_engaged:
+        state_str = "ENGAGED"
+    else:
+        state_str = "FAILURE"
+
+    # Rate stats.
+    cumul_success_rate  = (_success_count / _total_count * 100) if _total_count > 0 else 0.0
+    cumul_engaged_rate  = (_engaged_count / _total_count * 100) if _total_count > 0 else 0.0
+    recent_success_frac = (sum(_recent_window) / len(_recent_window) * 100) if _recent_window else 0.0
+    recent_engaged_frac = (sum(_recent_engaged_window) / len(_recent_engaged_window) * 100) if _recent_engaged_window else 0.0
 
     off_mm  = [x * 1000 for x in _pos_offset]
     eul_deg = [math.degrees(x) for x in _euler_offset]
 
     print(
-        f"[step {step:5d}] env0={success_str}"
-        f"  cumul={_success_count}/{_total_count}({cumul_rate:.1f}%)"
-        f"  recent-100={recent_frac:.1f}%"
+        f"[step {step:5d}] env0={state_str}"
+        f"  engaged={_engaged_count}/{_total_count}({cumul_engaged_rate:.1f}%)"
+        f"  success={_success_count}/{_total_count}({cumul_success_rate:.1f}%)"
+        f"  recent-engaged={recent_engaged_frac:.1f}%  recent-success={recent_success_frac:.1f}%\n"
         f"  pos=[{off_mm[0]:+.1f},{off_mm[1]:+.1f},{off_mm[2]:+.1f}]mm"
         f"  euler=[{eul_deg[0]:+.1f},{eul_deg[1]:+.1f},{eul_deg[2]:+.1f}]°\n"
         f"  left  clip pos: {_fmt_pos(lc0)}  →  dist-to-hole: {_fmt_dist(dl, dl_norm)}\n"
@@ -367,13 +405,14 @@ def main():
             _poll_keys_and_move_lid(inner)
             _draw_clip_hole_markers(inner)
 
-            # Compute success every step for rate tracking.
+            # Compute engaged (clips inside groove) and success (clips fully seated).
+            engaged   = inner._get_curr_successes(success_threshold=0.9)
             successes = inner._get_curr_successes(success_threshold=inner.cfg_task.success_threshold)
-            _track_success(successes)
+            _track_success(successes, engaged)
 
-            # Print detailed info every 10 steps (3× more frequent than before).
+            # Print detailed info every 10 steps.
             if step % 10 == 0:
-                _print_success_info(inner, step, successes)
+                _print_success_info(inner, step, successes, engaged)
 
             if torch.any(done | trunc):
                 env.reset()

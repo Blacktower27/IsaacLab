@@ -52,7 +52,7 @@ params:
   config:
     name: Forge
     device: cuda:0
-    full_experiment_name: test
+    # full_experiment_name: test # optional, if not provided, will be generated based on the config times
     env_name: rlgpu
     multi_gpu: False
     ppo: True

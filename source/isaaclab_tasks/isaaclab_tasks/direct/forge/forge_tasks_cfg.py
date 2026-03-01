@@ -6,7 +6,7 @@
 import os as _os
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg
+from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.utils import configclass
 
 from isaaclab_tasks.direct.factory.factory_tasks_cfg import (
@@ -155,17 +155,21 @@ class ForgeBoxLidInsert(ForgeTask):
     duration_s: float = 15.0
 
     # --- Robot initial state (relative to fixed-asset tip = box top face) ---
-    # hand_init_pos[2] = 0.10 m → EE starts 100 mm above the box top, giving
-    # enough clearance to avoid clipping the box during the grasp reset.
-    hand_init_pos: list = [0.0, 0.0, 0.10]
-    hand_init_pos_noise: list = [0.02, 0.02, 0.01]
+    # hand_init_pos[2] = 0.05 m: lid body bottom sits ~20 mm above box top,
+    # clear of box walls. Engage-zone initialization is geometrically infeasible:
+    # any clip-in-pocket position requires lid body inside box cavity → penetration.
+    # hand_init_pos: list = [0.0, 0.0, 0.05]
+    hand_init_pos: list = [0.00, 0.07, 0.043]
+    # hand_init_pos_noise: list = [0.02, 0.02, 0.01]
+    hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     # hand_init_orn = [roll, pitch, yaw] in radians.  π on roll = EE pointing down.
     hand_init_orn: list = [3.1416, 0.0, 0.0]
-    # ±45° yaw noise so the policy must learn to handle arbitrary approach angles.
-    hand_init_orn_noise: list = [0.0, 0.0, 0.785]
+    # Yaw is overridden in randomize_initial_state to align with box yaw (so clips face pockets).
+    hand_init_orn_noise: list = [0.0, 0.0, 0.0]
 
     # --- Fixed asset (box) randomisation ---
-    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]
+    # fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]  # Z=0.05 allows vertical jitter
+    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]  # Z fixed to table surface
     fixed_asset_init_orn_deg: float = 0.0
     # Full 360° yaw randomisation: the policy must handle the box at any orientation.
     fixed_asset_init_orn_range_deg: float = 360.0
@@ -180,11 +184,13 @@ class ForgeBoxLidInsert(ForgeTask):
     # held_asset_rot_init.  pitch=35° tilts the lid slightly forward so the handle
     # clears the finger pads during the closing step.
     held_asset_rot_offset: list = [0.0, 35.0, 0.0]
+    # held_asset_rot_offset: list = [0.0, 0.0, 0.0]
     # held_asset_pos_offset = fine-tune translation [x, y, z] in the flipped
     # fingertip frame (metres).  y=0.02 shifts the lid 20 mm "inward" so the
     # handle is centred between the finger pads; z=0.005 compensates for the
     # 5 mm height difference between finger pad centre and handle top.
     held_asset_pos_offset: list = [0.0, 0.02, 0.005]
+    # held_asset_pos_offset: list = [0.0, 0.0, -0.01]
 
     # --- Reward shaping (same structure as ForgePegInsert) ---
     contact_penalty_scale: float = 0.2
@@ -203,18 +209,15 @@ class ForgeBoxLidInsert(ForgeTask):
     engage_threshold: float = 0.9
 
     # --- Scene assets ---
-    fixed_asset: ArticulationCfg = ArticulationCfg(
+    # Box is a kinematic RigidObject: PhysX treats it as infinite-mass static body,
+    # so contact forces against the lid are physically correct. This avoids the
+    # fix_root_link=True incompatibility with FactoryEnv's gpu_max_num_partitions=1.
+    fixed_asset: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/FixedAsset",
         spawn=sim_utils.UsdFileCfg(
             usd_path=fixed_asset_cfg.usd_path,
             activate_contact_sensors=True,
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False,
-                # fix_root_link=False: the box is NOT kinematically frozen; gravity
-                # holds it on the table and a strong shove can move it (realistic).
-                # Keeps the physics pipeline consistent with other Factory tasks.
-                fix_root_link=False,
-            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(articulation_enabled=False),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 max_depenetration_velocity=5.0,
@@ -226,21 +229,15 @@ class ForgeBoxLidInsert(ForgeTask):
                 solver_position_iteration_count=192,
                 solver_velocity_iteration_count=1,
                 max_contact_impulse=1e32,
+                kinematic_enabled=True,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=fixed_asset_cfg.mass),
-            # [CUSTOM] contact_offset reduced from the Factory default of 0.005 m
-            # (5 mm) to 0.001 m (1 mm).
-            # contact_offset is the distance at which PhysX starts generating
-            # contact constraints.  With the box-lid clearance of only a few mm,
-            # the default 5 mm would cause PhysX to push the lid away BEFORE it
-            # geometrically reaches the box top, preventing the lid from seating.
-            # NOTE: this runtime value overrides whatever is baked into the USD file.
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.001, rest_offset=0.0),
         ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.6, 0.0, 0.05), rot=(1.0, 0.0, 0.0, 0.0), joint_pos={}, joint_vel={}
+        init_state=RigidObjectCfg.InitialStateCfg(
+            # pos=(0.6, 0.0, 0.05),  # 0.05: bolt-fixture height used by other Factory tasks
+            pos=(0.6, 0.0, 0.0), rot=(1.0, 0.0, 0.0, 0.0)  # 0.0: box base flush with table surface
         ),
-        actuators={},
     )
     held_asset: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/HeldAsset",
