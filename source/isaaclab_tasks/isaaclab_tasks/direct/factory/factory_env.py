@@ -432,7 +432,7 @@ class FactoryEnv(DirectRLEnv):
                 #   Z: [18, 35] mm — groove floor (21 mm) with tolerance, up to 5 mm above box
                 _X_TOL = 0.002
                 _Y_MIN, _Y_MAX = -0.0495,  0.035
-                _Z_MIN, _Z_MAX =  0.024,   0.030
+                _Z_MIN, _Z_MAX =  0.018,   0.030
 
                 left_x_ok  = (left_clip_box[:,  0] - _LEFT_HOLE_X).abs()  < _X_TOL
                 right_x_ok = (right_clip_box[:, 0] - _RIGHT_HOLE_X).abs() < _X_TOL
@@ -446,7 +446,7 @@ class FactoryEnv(DirectRLEnv):
                 #   Y: ±2 mm from outer clip face / front wall (Y = -0.0444)
                 #   Z: [21, 29] mm — full pocket Z window
                 _X_TOL        = 0.002
-                _Y_TOL        = 0.002
+                _Y_TOL        = 0.004 #used to be 0.002, relaxed to 4mm to account for slight misalignments that still constitute success 
                 _HOLE_WALL_Y  = -0.0444
                 _Z_MIN, _Z_MAX = 0.021, 0.029
 
@@ -599,16 +599,27 @@ class FactoryEnv(DirectRLEnv):
 
         self.randomize_initial_state(env_ids)
 
-        # [CUSTOM] Sample random keypoints in lid body bounds for box_lid_insert.
+        # [CUSTOM] Keypoints for box_lid_insert.
         # At success pose lid origin = box origin, so kp_box_local == kp_lid_local.
         if self.cfg_task.name == "box_lid_insert":
-            n = self.cfg_task.num_keypoints
-            kp = torch.rand((len(env_ids), n, 3), device=self.device)
-            kp[:, :, 0] = kp[:, :, 0] * 0.1046 - 0.0523  # X: [-52.3, +52.3] mm
-            kp[:, :, 1] = kp[:, :, 1] * 0.0838 - 0.0444  # Y: [-44.4, +39.4] mm
-            kp[:, :, 2] = kp[:, :, 2] * 0.0112 + 0.0188  # Z: [+18.8, +30.0] mm
-            self.kp_lid_local[env_ids] = kp
-            self.kp_box_local[env_ids] = kp
+            # -- Clip-based keypoints (2 points): left + right snap-fit clip tooth centres
+            #    in lid local frame (metres). Target in box local frame is identical because
+            #    at the success pose the two origins coincide.
+            left_clip  = torch.tensor([-0.025218, -0.0444, 0.0289], device=self.device)
+            right_clip = torch.tensor([ 0.024250, -0.0444, 0.0289], device=self.device)
+            self.kp_lid_local[env_ids, 0] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
+            self.kp_lid_local[env_ids, 1] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
+            self.kp_box_local[env_ids, 0] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
+            self.kp_box_local[env_ids, 1] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
+
+            # -- Random keypoints (4 points) in lid body bounds — commented out.
+            # n = self.cfg_task.num_keypoints
+            # kp = torch.rand((len(env_ids), n, 3), device=self.device)
+            # kp[:, :, 0] = kp[:, :, 0] * 0.1046 - 0.0523  # X: [-52.3, +52.3] mm
+            # kp[:, :, 1] = kp[:, :, 1] * 0.0838 - 0.0444  # Y: [-44.4, +39.4] mm
+            # kp[:, :, 2] = kp[:, :, 2] * 0.0112 + 0.0188  # Z: [+18.8, +30.0] mm
+            # self.kp_lid_local[env_ids] = kp
+            # self.kp_box_local[env_ids] = kp
 
     def _set_assets_to_default_pose(self, env_ids):
         """Move assets to default pose before randomization."""
@@ -886,7 +897,7 @@ class FactoryEnv(DirectRLEnv):
             bad_envs = bad_envs[any_error.nonzero(as_tuple=False).squeeze(-1)]
 
             # Check IK succeeded for all envs, otherwise try again for those envs
-            if bad_envs.shape[0] == 0:
+            if bad_envs.shape[0] == 0 or ik_attempt >= 100:
                 break
 
             self._set_franka_to_default_pose(

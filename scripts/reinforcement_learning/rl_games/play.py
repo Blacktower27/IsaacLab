@@ -211,6 +211,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # env stepping
             obs, _, dones, _ = env.step(actions)
 
+            # Print success prediction and true geometric success each step.
+            base_env = env.unwrapped
+            if actions.shape[-1] > 6:
+                success_pred = (actions[:, 6] + 1) / 2
+                pred_str = (f"pred={success_pred.mean().item():.3f} "
+                            f"(min={success_pred.min().item():.3f} max={success_pred.max().item():.3f})")
+            else:
+                pred_str = "pred=N/A"
+            if hasattr(base_env, "_get_curr_successes") and hasattr(base_env, "cfg_task"):
+                check_rot = base_env.cfg_task.name == "nut_thread"
+                true_succ = base_env._get_curr_successes(
+                    success_threshold=base_env.cfg_task.success_threshold, check_rot=check_rot
+                )
+                n_succ = true_succ.sum().item()
+                n_envs = base_env.num_envs
+                succ_str = f"true={n_succ}/{n_envs}"
+            else:
+                succ_str = "true=N/A"
+            print(f"[play] {pred_str}  |  {succ_str}")
+
             # perform operations for terminated episodes
             if len(dones) > 0:
                 # reset rnn state for terminated episodes

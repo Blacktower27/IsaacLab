@@ -380,6 +380,7 @@ def main():
         env_cfg.task.fixed_asset_init_pos_noise = [0.0, 0.0, 0.0]
         env_cfg.task.fixed_asset_init_orn_range_deg = 0.0
 
+    env_cfg.task.hand_init_pos        = [0.0, 0.0, 0.5]  # park arm 50 cm above box, out of the way
     env_cfg.task.hand_init_pos_noise  = [0.0, 0.0, 0.0]
     env_cfg.task.hand_init_orn_noise  = [0.0, 0.0, 0.0]
     env_cfg.task.held_asset_pos_noise = [0.0, 0.0, 0.0]
@@ -395,12 +396,27 @@ def main():
         "Shift=5×speed  R=reset\n"
     )
 
+    # Pre-compute frozen joint state (default pose, gripper open to lid handle width).
+    _all_env_ids = torch.arange(inner.num_envs, device=inner.device)
+    _frozen_joint_pos = inner._robot.data.default_joint_pos.clone()
+    _frozen_joint_pos[:, :7] = torch.tensor(
+        inner.cfg.ctrl.reset_joints, device=inner.device
+    ).unsqueeze(0).expand(inner.num_envs, -1)
+    gripper_width = inner.cfg_task.held_asset_cfg.diameter / 2 * 1.25
+    _frozen_joint_pos[:, 7:] = gripper_width
+    _frozen_joint_vel = torch.zeros_like(_frozen_joint_pos)
+
     step = 0
     while simulation_app.is_running():
         with torch.inference_mode():
             actions = torch.zeros(env.action_space.shape, device=inner.device)
             _, _, done, trunc, _ = env.step(actions)
             step += 1
+
+            # Freeze robot arm: override joint state and controller target every step.
+            inner._robot.write_joint_state_to_sim(_frozen_joint_pos, _frozen_joint_vel)
+            inner._robot.set_joint_position_target(_frozen_joint_pos)
+            inner._robot.set_joint_effort_target(_frozen_joint_vel)
 
             _poll_keys_and_move_lid(inner)
             _draw_clip_hole_markers(inner)
