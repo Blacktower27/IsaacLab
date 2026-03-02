@@ -193,7 +193,10 @@ class ForgeBoxLidInsert(ForgeTask):
     # held_asset_pos_offset: list = [0.0, 0.0, -0.01]
 
     # --- Reward shaping (same structure as ForgePegInsert) ---
-    contact_penalty_scale: float = 0.2
+    # contact_penalty_scale: float = 0.2
+    contact_penalty_scale: float = 0
+    # 2 keypoints = left + right snap-fit clip tooth positions (see _reset_idx in factory_env.py)
+    num_keypoints: int = 2
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
