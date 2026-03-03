@@ -191,6 +191,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(obs, dict):
         obs = obs["obs"]
     timestep = 0
+    # success rate tracking (any frame success counts per episode)
+    total_episodes = 0
+    total_successes = 0
     # required: enables the flag for batched observations
     _ = agent.get_batch_size(obs, 1)
     # initialize RNN states if used
@@ -233,6 +236,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # perform operations for terminated episodes
             if len(dones) > 0:
+                # episode-level success rate: count episodes where any frame succeeded
+                reset_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+                if len(reset_ids) > 0 and hasattr(base_env, "ep_succeeded"):
+                    total_successes += base_env.ep_succeeded[reset_ids].sum().item()
+                    total_episodes += len(reset_ids)
+                    rate = total_successes / total_episodes
+                    print(
+                        f"[EVAL] episodes={total_episodes}  successes={int(total_successes)}"
+                        f"  success_rate={rate:.3f}"
+                    )
                 # reset rnn state for terminated episodes
                 if agent.is_rnn and agent.states is not None:
                     for s in agent.states:
