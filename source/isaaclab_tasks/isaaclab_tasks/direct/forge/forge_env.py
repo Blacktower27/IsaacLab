@@ -143,7 +143,8 @@ class ForgeEnv(FactoryEnv):
 
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
-        return {"policy": obs_tensors, "critic": state_tensors}
+        obs_out, state_out = self._update_obs_state_history(obs_tensors, state_tensors)
+        return {"policy": obs_out, "critic": state_out}
 
     def _apply_action(self):
         """FORGE actions are defined as targets relative to the fixed asset."""

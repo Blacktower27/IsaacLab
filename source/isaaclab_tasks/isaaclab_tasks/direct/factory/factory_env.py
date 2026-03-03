@@ -24,11 +24,13 @@ class FactoryEnv(DirectRLEnv):
     cfg: FactoryEnvCfg
 
     def __init__(self, cfg: FactoryEnvCfg, render_mode: str | None = None, **kwargs):
-        # Update number of obs/states
+        # Update number of obs/states (single-timestep dims, then multiply by window size).
         cfg.observation_space = sum([OBS_DIM_CFG[obs] for obs in cfg.obs_order])
         cfg.state_space = sum([STATE_DIM_CFG[state] for state in cfg.state_order])
         cfg.observation_space += cfg.action_space
         cfg.state_space += cfg.action_space
+        cfg.observation_space *= cfg.obs_window_size
+        cfg.state_space *= cfg.state_window_size
         self.cfg_task = cfg.task
 
         super().__init__(cfg, render_mode, **kwargs)
@@ -81,6 +83,16 @@ class FactoryEnv(DirectRLEnv):
 
         self.ep_succeeded = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.ep_success_times = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
+
+        # Observation/state history buffers (supports window_size > 1).
+        single_obs_dim = sum([OBS_DIM_CFG[obs] for obs in self.cfg.obs_order]) + self.cfg.action_space
+        single_state_dim = sum([STATE_DIM_CFG[state] for state in self.cfg.state_order]) + self.cfg.action_space
+        self.obs_history_buf = torch.zeros(
+            (self.num_envs, self.cfg.obs_window_size, single_obs_dim), device=self.device
+        )
+        self.state_history_buf = torch.zeros(
+            (self.num_envs, self.cfg.state_window_size, single_state_dim), device=self.device
+        )
 
         # [CUSTOM] Per-episode keypoints for box_lid_insert (sampled once per reset).
         if self.cfg_task.name == "box_lid_insert":
@@ -169,6 +181,28 @@ class FactoryEnv(DirectRLEnv):
 
         self.last_update_timestamp = self._robot._data._sim_timestamp
 
+    def _update_obs_state_history(self, obs_tensors, state_tensors):
+        """Shift history buffers left and insert the latest obs/state at the end.
+
+        Returns flattened tensors of shape (num_envs, obs_window_size * single_obs_dim)
+        and (num_envs, state_window_size * single_state_dim).
+        """
+        if self.cfg.obs_window_size > 1:
+            self.obs_history_buf[:, :-1] = self.obs_history_buf[:, 1:].clone()
+        self.obs_history_buf[:, -1] = obs_tensors
+
+        if self.cfg.state_window_size > 1:
+            self.state_history_buf[:, :-1] = self.state_history_buf[:, 1:].clone()
+        self.state_history_buf[:, -1] = state_tensors
+
+        obs_out = self.obs_history_buf.view(self.num_envs, -1)
+        state_out = self.state_history_buf.view(self.num_envs, -1)
+        if not hasattr(self, "_obs_shape_printed"):
+            print(f"[DEBUG] obs_out shape: {obs_out.shape}  (window={self.cfg.obs_window_size})")
+            print(f"[DEBUG] state_out shape: {state_out.shape}  (window={self.cfg.state_window_size})")
+            self._obs_shape_printed = True
+        return obs_out, state_out
+
     def _get_factory_obs_state_dict(self):
         """Populate dictionaries for the policy and critic."""
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
@@ -209,7 +243,8 @@ class FactoryEnv(DirectRLEnv):
 
         obs_tensors = factory_utils.collapse_obs_dict(obs_dict, self.cfg.obs_order + ["prev_actions"])
         state_tensors = factory_utils.collapse_obs_dict(state_dict, self.cfg.state_order + ["prev_actions"])
-        return {"policy": obs_tensors, "critic": state_tensors}
+        obs_out, state_out = self._update_obs_state_history(obs_tensors, state_tensors)
+        return {"policy": obs_out, "critic": state_out}
 
     def _reset_buffers(self, env_ids):
         """Reset buffers."""
@@ -603,6 +638,10 @@ class FactoryEnv(DirectRLEnv):
     def _reset_idx(self, env_ids):
         """We assume all envs will always be reset at the same time."""
         super()._reset_idx(env_ids)
+
+        # Clear history buffers for reset environments.
+        self.obs_history_buf[env_ids] = 0.0
+        self.state_history_buf[env_ids] = 0.0
 
         self._set_assets_to_default_pose(env_ids)
         self._set_franka_to_default_pose(joints=self.cfg.ctrl.reset_joints, env_ids=env_ids)

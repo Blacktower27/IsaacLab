@@ -88,6 +88,12 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         "fixed_quat",
     ]
 
+    # Window (history) sizes for policy obs and critic state.
+    # obs_window_size > 1 stacks the last N timesteps into the policy observation.
+    # state_window_size > 1 stacks the last N timesteps into the critic state.
+    obs_window_size: int = 5
+    state_window_size: int = 5
+
     task_name: str = "peg_insert"  # peg_insert, gear_mesh, nut_thread
     task: FactoryTask = FactoryTask()
     obs_rand: ObsRandCfg = ObsRandCfg()
