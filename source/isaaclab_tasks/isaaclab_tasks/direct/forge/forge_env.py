@@ -88,7 +88,7 @@ class ForgeEnv(FactoryEnv):
         rot_diff_quat *= torch.sign(rot_diff_quat[:, 0]).unsqueeze(-1)
         rot_diff_aa = axis_angle_from_quat(rot_diff_quat)
         self.ee_angvel_fd = rot_diff_aa / dt
-        self.ee_angvel_fd[:, 0:2] = 0.0
+        self.ee_angvel_fd[:, 0] = 0.0
         self.prev_fingertip_quat = self.noisy_fingertip_quat.clone()
 
         # Update and smooth force values.
@@ -119,7 +119,7 @@ class ForgeEnv(FactoryEnv):
 
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
         prev_actions = self.actions.clone()
-        prev_actions[:, 3:5] = 0.0
+        prev_actions[:, 3] = 0.0
 
         obs_dict.update(
             {
@@ -162,7 +162,7 @@ class ForgeEnv(FactoryEnv):
         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
         ctrl_target_fingertip_preclipped_pos = fixed_pos_action_frame + pos_actions
         # (1.b) Enforce rotation action constraints.
-        rot_actions[:, 0:2] = 0.0
+        rot_actions[:, 0] = 0.0
 
         # Assumes joint limit is in (+x, -y)-quadrant of world frame.
         rot_actions[:, 2] = np.deg2rad(-180.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0  # Joint limit.
