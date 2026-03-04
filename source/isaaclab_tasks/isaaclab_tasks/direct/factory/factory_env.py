@@ -488,6 +488,17 @@ class FactoryEnv(DirectRLEnv):
 
         first_success_ids = first_success.nonzero(as_tuple=False).squeeze(-1)
         self.ep_success_times[first_success_ids] = self.episode_length_buf[first_success_ids]
+
+        # [CUSTOM] For box_lid_insert: on first success, keep the 2 clip keypoints (index 0,1)
+        # and add 2 random keypoints (index 2,3) spread across the lid body to guide pressing down.
+        # Updated here so the NEXT call to _get_factory_rew_dict picks up the new keypoints.
+        if self.cfg_task.name == "box_lid_insert" and len(first_success_ids) > 0:
+            kp = torch.rand((len(first_success_ids), 2, 3), device=self.device)
+            kp[:, :, 0] = kp[:, :, 0] * 0.1046 - 0.0523  # X: [-52.3, +52.3] mm
+            kp[:, :, 1] = kp[:, :, 1] * 0.0838 - 0.0444  # Y: [-44.4, +39.4] mm
+            kp[:, :, 2] = kp[:, :, 2] * 0.0112 + 0.0188  # Z: [+18.8, +30.0] mm
+            self.kp_lid_local[first_success_ids, 2:] = kp
+            self.kp_box_local[first_success_ids, 2:] = kp
         nonzero_success_ids = self.ep_success_times.nonzero(as_tuple=False).squeeze(-1)
 
         if len(nonzero_success_ids) > 0:  # Only log for successful episodes.
@@ -605,12 +616,15 @@ class FactoryEnv(DirectRLEnv):
             # -- Clip-based keypoints (2 points): left + right snap-fit clip tooth centres
             #    in lid local frame (metres). Target in box local frame is identical because
             #    at the success pose the two origins coincide.
+            # index 0,1 = clip positions; index 2,3 = clip duplicate (cleared to clips on reset,
+            # replaced with random keypoints after first success in _log_factory_metrics).
             left_clip  = torch.tensor([-0.025218, -0.0444, 0.0289], device=self.device)
             right_clip = torch.tensor([ 0.024250, -0.0444, 0.0289], device=self.device)
-            self.kp_lid_local[env_ids, 0] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
-            self.kp_lid_local[env_ids, 1] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
-            self.kp_box_local[env_ids, 0] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
-            self.kp_box_local[env_ids, 1] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
+            for buf in (self.kp_lid_local, self.kp_box_local):
+                buf[env_ids, 0] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
+                buf[env_ids, 1] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
+                buf[env_ids, 2] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
+                buf[env_ids, 3] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
 
             # -- Random keypoints (4 points) in lid body bounds — commented out.
             # n = self.cfg_task.num_keypoints
