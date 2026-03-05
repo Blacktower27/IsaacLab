@@ -191,7 +191,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(obs, dict):
         obs = obs["obs"]
     timestep = 0
-    # success rate tracking (any frame success counts per episode)
+    # success rate tracking: per-env flag within current episode, plus cumulative stats
+    ever_succeeded = None
     total_episodes = 0
     total_successes = 0
     # required: enables the flag for batched observations
@@ -227,25 +228,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 true_succ = base_env._get_curr_successes(
                     success_threshold=base_env.cfg_task.success_threshold, check_rot=check_rot
                 )
-                n_succ = true_succ.sum().item()
                 n_envs = base_env.num_envs
-                succ_str = f"true={n_succ}/{n_envs}"
+                # accumulate per-env ever-succeeded flag
+                if ever_succeeded is None:
+                    ever_succeeded = torch.zeros(n_envs, dtype=torch.bool, device=true_succ.device)
+                ever_succeeded |= true_succ
+                n_ever = ever_succeeded.sum().item()
+                rate = n_ever / n_envs
+                succ_str = f"true={true_succ.sum().item()}/{n_envs}  ever={n_ever}/{n_envs}({rate:.2%})"
             else:
                 succ_str = "true=N/A"
             print(f"[play] {pred_str}  |  {succ_str}")
 
             # perform operations for terminated episodes
             if len(dones) > 0:
-                # episode-level success rate: count episodes where any frame succeeded
                 reset_ids = dones.nonzero(as_tuple=False).squeeze(-1)
-                if len(reset_ids) > 0 and hasattr(base_env, "ep_succeeded"):
-                    total_successes += base_env.ep_succeeded[reset_ids].sum().item()
+                if len(reset_ids) > 0 and ever_succeeded is not None:
+                    total_successes += ever_succeeded[reset_ids].sum().item()
                     total_episodes += len(reset_ids)
                     rate = total_successes / total_episodes
                     print(
                         f"[EVAL] episodes={total_episodes}  successes={int(total_successes)}"
-                        f"  success_rate={rate:.3f}"
+                        f"  success_rate={rate:.2%}"
                     )
+                    ever_succeeded[reset_ids] = False  # reset for next episode
                 # reset rnn state for terminated episodes
                 if agent.is_rnn and agent.states is not None:
                     for s in agent.states:
