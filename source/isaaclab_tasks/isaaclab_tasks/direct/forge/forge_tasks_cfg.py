@@ -159,13 +159,24 @@ class ForgeBoxLidInsert(ForgeTask):
     # clear of box walls. Engage-zone initialization is geometrically infeasible:
     # any clip-in-pocket position requires lid body inside box cavity → penetration.
     # hand_init_pos: list = [0.0, 0.0, 0.05]
-    hand_init_pos: list = [0.00, 0.07, 0.043]
+    hand_init_pos: list = [0.00, 0.07, 0.043]  # [x, y, z] box-local; z used as fallback only
     # hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     # hand_init_orn = [roll, pitch, yaw] in radians.  π on roll = EE pointing down.
     hand_init_orn: list = [3.1416, 0.0, 0.0]
     # Yaw is overridden in randomize_initial_state to align with box yaw (so clips face pockets).
     hand_init_orn_noise: list = [0.0, 0.0, 0.0]
+
+    # --- Random initial pose (box_lid_insert) ---
+    # XYZ are sampled uniformly within the ranges below (box-local frame, metres).
+    # XY is rotated to world frame via box yaw before applying.
+    # Z is the EE height above the box top face (fixed_tip_pos.z).
+    # Yaw/pitch noise is added on top of the box-aligned yaw.
+    hand_init_x_range: list = [-0.05, 0.05]   # X in box-local frame (m)
+    hand_init_y_range: list = [0.0,   0.1]   # Y in box-local frame, back half (m)
+    hand_init_z_range: list = [0.055, 0.085]  # Z above box top (m)
+    hand_init_yaw_noise_deg: float = 20.0     # ±yaw noise (deg) on top of box-aligned yaw
+    hand_init_pitch_noise_deg: float = 20.0   # ±pitch noise (deg)
 
     # --- Fixed asset (box) randomisation ---
     # fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]  # Z=0.05 allows vertical jitter
@@ -195,8 +206,14 @@ class ForgeBoxLidInsert(ForgeTask):
     # --- Reward shaping (same structure as ForgePegInsert) ---
     # contact_penalty_scale: float = 0.2
     contact_penalty_scale: float = 0
-    # 4 keypoints: index 0,1 = left/right clip (always); index 2,3 = random after first success
-    num_keypoints: int = 4
+    # Keypoint layout:
+    #   index 0,1          = left/right clip positions (always fixed)
+    #   index 2..2+nr-1    = extra front-face kps at reset (same Y,Z as clips; X random in lid-front range)
+    #   index 2..2+ns-1    = random lid-body kps added on first success (overwrites extra reset kps)
+    # Total buffer size = 2 + max(num_reset_extra_kp, num_success_extra_kp)
+    # (num_keypoints is unused for box_lid_insert; computed automatically in factory_env.py)
+    num_reset_extra_kp: int = 10    # extra front-face keypoints at reset
+    num_success_extra_kp: int = 100  # random body keypoints added on first success
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]

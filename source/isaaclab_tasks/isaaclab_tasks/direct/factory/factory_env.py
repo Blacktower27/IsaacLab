@@ -96,7 +96,7 @@ class FactoryEnv(DirectRLEnv):
 
         # [CUSTOM] Per-episode keypoints for box_lid_insert (sampled once per reset).
         if self.cfg_task.name == "box_lid_insert":
-            n = self.cfg_task.num_keypoints
+            n = 2 + max(self.cfg_task.num_reset_extra_kp, self.cfg_task.num_success_extra_kp)
             self.kp_lid_local = torch.zeros((self.num_envs, n, 3), device=self.device)
             self.kp_box_local = torch.zeros((self.num_envs, n, 3), device=self.device)
 
@@ -525,15 +525,16 @@ class FactoryEnv(DirectRLEnv):
         self.ep_success_times[first_success_ids] = self.episode_length_buf[first_success_ids]
 
         # [CUSTOM] For box_lid_insert: on first success, keep the 2 clip keypoints (index 0,1)
-        # and add 2 random keypoints (index 2,3) spread across the lid body to guide pressing down.
+        # and replace index 2..2+ns-1 with random keypoints spread across the lid body.
         # Updated here so the NEXT call to _get_factory_rew_dict picks up the new keypoints.
         if self.cfg_task.name == "box_lid_insert" and len(first_success_ids) > 0:
-            kp = torch.rand((len(first_success_ids), 2, 3), device=self.device)
+            ns = self.cfg_task.num_success_extra_kp
+            kp = torch.rand((len(first_success_ids), ns, 3), device=self.device)
             kp[:, :, 0] = kp[:, :, 0] * 0.1046 - 0.0523  # X: [-52.3, +52.3] mm
             kp[:, :, 1] = kp[:, :, 1] * 0.0838 - 0.0444  # Y: [-44.4, +39.4] mm
             kp[:, :, 2] = kp[:, :, 2] * 0.0112 + 0.0188  # Z: [+18.8, +30.0] mm
-            self.kp_lid_local[first_success_ids, 2:] = kp
-            self.kp_box_local[first_success_ids, 2:] = kp
+            self.kp_lid_local[first_success_ids, 2:2 + ns] = kp
+            self.kp_box_local[first_success_ids, 2:2 + ns] = kp
         nonzero_success_ids = self.ep_success_times.nonzero(as_tuple=False).squeeze(-1)
 
         if len(nonzero_success_ids) > 0:  # Only log for successful episodes.
@@ -572,7 +573,7 @@ class FactoryEnv(DirectRLEnv):
             # [CUSTOM] Use per-episode randomly sampled keypoints (fixed within episode).
             # kp_lid_local and kp_box_local are identical because at the success pose
             # the lid USD origin coincides with the box USD origin.
-            n = self.cfg_task.num_keypoints
+            n = 2 + max(self.cfg_task.num_reset_extra_kp, self.cfg_task.num_success_extra_kp)
             keypoints_held  = torch.zeros((self.num_envs, n, 3), device=self.device)
             keypoints_fixed = torch.zeros((self.num_envs, n, 3), device=self.device)
             for i in range(n):
@@ -652,27 +653,35 @@ class FactoryEnv(DirectRLEnv):
         # [CUSTOM] Keypoints for box_lid_insert.
         # At success pose lid origin = box origin, so kp_box_local == kp_lid_local.
         if self.cfg_task.name == "box_lid_insert":
-            # -- Clip-based keypoints (2 points): left + right snap-fit clip tooth centres
-            #    in lid local frame (metres). Target in box local frame is identical because
-            #    at the success pose the two origins coincide.
-            # index 0,1 = clip positions; index 2,3 = clip duplicate (cleared to clips on reset,
-            # replaced with random keypoints after first success in _log_factory_metrics).
+            nr = self.cfg_task.num_reset_extra_kp
+            ns = self.cfg_task.num_success_extra_kp
+            n_total = 2 + max(nr, ns)
             left_clip  = torch.tensor([-0.025218, -0.0444, 0.0289], device=self.device)
             right_clip = torch.tensor([ 0.024250, -0.0444, 0.0289], device=self.device)
+
+            # index 0,1: fixed clip positions
             for buf in (self.kp_lid_local, self.kp_box_local):
                 buf[env_ids, 0] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
                 buf[env_ids, 1] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
-                buf[env_ids, 2] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
-                buf[env_ids, 3] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
 
-            # -- Random keypoints (4 points) in lid body bounds — commented out.
-            # n = self.cfg_task.num_keypoints
-            # kp = torch.rand((len(env_ids), n, 3), device=self.device)
-            # kp[:, :, 0] = kp[:, :, 0] * 0.1046 - 0.0523  # X: [-52.3, +52.3] mm
-            # kp[:, :, 1] = kp[:, :, 1] * 0.0838 - 0.0444  # Y: [-44.4, +39.4] mm
-            # kp[:, :, 2] = kp[:, :, 2] * 0.0112 + 0.0188  # Z: [+18.8, +30.0] mm
-            # self.kp_lid_local[env_ids] = kp
-            # self.kp_box_local[env_ids] = kp
+            # index 2..2+nr-1: extra front-face keypoints (same Y,Z as clips; X random in lid front)
+            if nr > 0:
+                x_rand = torch.rand((len(env_ids), nr), device=self.device) * 0.1046 - 0.0523
+                kp_front = torch.stack([
+                    x_rand,
+                    torch.full_like(x_rand, -0.0444),
+                    torch.full_like(x_rand,  0.0289),
+                ], dim=-1)  # (len(env_ids), nr, 3)
+                for buf in (self.kp_lid_local, self.kp_box_local):
+                    buf[env_ids, 2:2 + nr] = kp_front
+
+            # If ns > nr, the spare slots 2+nr..n_total-1 are filled with left_clip
+            # to avoid zero-initialization until first success replaces them.
+            if ns > nr:
+                spare = ns - nr
+                spare_kp = left_clip.unsqueeze(0).unsqueeze(0).expand(len(env_ids), spare, -1)
+                for buf in (self.kp_lid_local, self.kp_box_local):
+                    buf[env_ids, 2 + nr:n_total] = spare_kp
 
     def _set_assets_to_default_pose(self, env_ids):
         """Move assets to default pose before randomization."""
@@ -900,13 +909,22 @@ class FactoryEnv(DirectRLEnv):
             above_fixed_pos_rand = above_fixed_pos_rand @ torch.diag(hand_init_pos_rand)
             above_fixed_pos[bad_envs] += above_fixed_pos_rand
 
-            # For box_lid_insert: apply XY from hand_init_pos in box-local frame.
-            # Rotating through fixed_quat makes the offset follow the box yaw.
+            # For box_lid_insert: apply XY and Z in box-local frame (box-yaw aligned).
             if self.cfg_task.name == "box_lid_insert":
-                xy_local = torch.tensor(
-                    [self.cfg_task.hand_init_pos[0], self.cfg_task.hand_init_pos[1], 0.0],
-                    device=self.device,
-                ).unsqueeze(0).repeat(self.num_envs, 1)
+                # [OLD: fixed XY offset from hand_init_pos cfg]
+                # xy_local = torch.tensor(
+                #     [self.cfg_task.hand_init_pos[0], self.cfg_task.hand_init_pos[1], 0.0],
+                #     device=self.device,
+                # ).unsqueeze(0).repeat(self.num_envs, 1)
+
+                # [NEW: random XYZ from cfg ranges (box-local frame)]
+                x_lo, x_hi = self.cfg_task.hand_init_x_range
+                y_lo, y_hi = self.cfg_task.hand_init_y_range
+                z_lo, z_hi = self.cfg_task.hand_init_z_range
+                r = torch.rand((self.num_envs, 3), device=self.device)
+                xy_local = torch.zeros((self.num_envs, 3), device=self.device)
+                xy_local[:, 0] = r[:, 0] * (x_hi - x_lo) + x_lo
+                xy_local[:, 1] = r[:, 1] * (y_hi - y_lo) + y_lo
                 identity = torch.tensor(
                     [1.0, 0.0, 0.0, 0.0], device=self.device
                 ).unsqueeze(0).repeat(self.num_envs, 1)
@@ -917,6 +935,10 @@ class FactoryEnv(DirectRLEnv):
                     xy_local,
                 )
                 above_fixed_pos += xy_world
+                # Z: sampled uniformly in [z_lo, z_hi] above box top.
+                above_fixed_pos[:, 2] = (
+                    fixed_tip_pos[:, 2] + r[:, 2] * (z_hi - z_lo) + z_lo
+                )
 
             # (b) get random orientation facing down
             hand_down_euler = (
@@ -929,10 +951,20 @@ class FactoryEnv(DirectRLEnv):
             above_fixed_orn_noise = above_fixed_orn_noise @ torch.diag(hand_init_orn_rand)
             hand_down_euler += above_fixed_orn_noise
 
-            # For box_lid_insert: align gripper yaw with box yaw so clips always face pockets.
+            # For box_lid_insert: align gripper yaw with box yaw so clips always face pockets,
+            # then add ±yaw and ±pitch noise for initial pose diversity.
             if self.cfg_task.name == "box_lid_insert":
                 _, _, box_yaw = torch_utils.get_euler_xyz(self.fixed_quat[bad_envs])
                 hand_down_euler[:, 2] = box_yaw - 0.5 * torch.pi
+                # [NEW: ±yaw and ±pitch noise]
+                yaw_noise = (torch.rand(n_bad, device=self.device) * 2 - 1) * np.deg2rad(
+                    self.cfg_task.hand_init_yaw_noise_deg
+                )
+                pitch_noise = (torch.rand(n_bad, device=self.device) * 2 - 1) * np.deg2rad(
+                    self.cfg_task.hand_init_pitch_noise_deg
+                )
+                hand_down_euler[:, 2] += yaw_noise
+                hand_down_euler[:, 1] += pitch_noise
 
             hand_down_quat[bad_envs, :] = torch_utils.quat_from_euler_xyz(
                 roll=hand_down_euler[:, 0], pitch=hand_down_euler[:, 1], yaw=hand_down_euler[:, 2]
