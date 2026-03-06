@@ -912,19 +912,19 @@ class FactoryEnv(DirectRLEnv):
             # For box_lid_insert: apply XY and Z in box-local frame (box-yaw aligned).
             if self.cfg_task.name == "box_lid_insert":
                 # [OLD: fixed XY offset from hand_init_pos cfg]
-                # xy_local = torch.tensor(
-                #     [self.cfg_task.hand_init_pos[0], self.cfg_task.hand_init_pos[1], 0.0],
-                #     device=self.device,
-                # ).unsqueeze(0).repeat(self.num_envs, 1)
+                xy_local = torch.tensor(
+                    [self.cfg_task.hand_init_pos[0], self.cfg_task.hand_init_pos[1], 0.0],
+                    device=self.device,
+                ).unsqueeze(0).repeat(self.num_envs, 1)
 
                 # [NEW: random XYZ from cfg ranges (box-local frame)]
-                x_lo, x_hi = self.cfg_task.hand_init_x_range
-                y_lo, y_hi = self.cfg_task.hand_init_y_range
-                z_lo, z_hi = self.cfg_task.hand_init_z_range
-                r = torch.rand((self.num_envs, 3), device=self.device)
-                xy_local = torch.zeros((self.num_envs, 3), device=self.device)
-                xy_local[:, 0] = r[:, 0] * (x_hi - x_lo) + x_lo
-                xy_local[:, 1] = r[:, 1] * (y_hi - y_lo) + y_lo
+                # x_lo, x_hi = self.cfg_task.hand_init_x_range
+                # y_lo, y_hi = self.cfg_task.hand_init_y_range
+                # z_lo, z_hi = self.cfg_task.hand_init_z_range
+                # r = torch.rand((self.num_envs, 3), device=self.device)
+                # xy_local = torch.zeros((self.num_envs, 3), device=self.device)
+                # xy_local[:, 0] = r[:, 0] * (x_hi - x_lo) + x_lo
+                # xy_local[:, 1] = r[:, 1] * (y_hi - y_lo) + y_lo
                 identity = torch.tensor(
                     [1.0, 0.0, 0.0, 0.0], device=self.device
                 ).unsqueeze(0).repeat(self.num_envs, 1)
@@ -936,9 +936,9 @@ class FactoryEnv(DirectRLEnv):
                 )
                 above_fixed_pos += xy_world
                 # Z: sampled uniformly in [z_lo, z_hi] above box top.
-                above_fixed_pos[:, 2] = (
-                    fixed_tip_pos[:, 2] + r[:, 2] * (z_hi - z_lo) + z_lo
-                )
+                # above_fixed_pos[:, 2] = (
+                #     fixed_tip_pos[:, 2] + r[:, 2] * (z_hi - z_lo) + z_lo
+                # )
 
             # (b) get random orientation facing down
             hand_down_euler = (

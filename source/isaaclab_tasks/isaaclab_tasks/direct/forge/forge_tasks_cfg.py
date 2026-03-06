@@ -175,8 +175,10 @@ class ForgeBoxLidInsert(ForgeTask):
     hand_init_x_range: list = [-0.05, 0.05]   # X in box-local frame (m)
     hand_init_y_range: list = [0.0,   0.1]   # Y in box-local frame, back half (m)
     hand_init_z_range: list = [0.055, 0.085]  # Z above box top (m)
-    hand_init_yaw_noise_deg: float = 20.0     # ±yaw noise (deg) on top of box-aligned yaw
-    hand_init_pitch_noise_deg: float = 20.0   # ±pitch noise (deg)
+    # hand_init_yaw_noise_deg: float = 20.0     # ±yaw noise (deg) on top of box-aligned yaw
+    # hand_init_pitch_noise_deg: float = 20.0   # ±pitch noise (deg)
+    hand_init_yaw_noise_deg: float = 0.0     # ±yaw noise (deg) on top of box-aligned yaw
+    hand_init_pitch_noise_deg: float = 0.0   # ±pitch noise (deg)
 
     # --- Fixed asset (box) randomisation ---
     # fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]  # Z=0.05 allows vertical jitter
