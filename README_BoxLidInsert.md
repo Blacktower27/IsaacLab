@@ -102,6 +102,36 @@ Terminal prints clip positions, distance to hole targets, and rolling success/en
 | `factory_env_cfg.py` | `state_window_size` | `64` | Timesteps stacked for critic input |
 | `factory_env_cfg.py` | `scene.num_envs` | `128` | Parallel environments |
 
+`obs_window_size = 1` → no stacking (Markovian). Larger = more context, slower training.
+
+---
+
+### Force/Torque Sensor in Observation
+
+Controlled by `obs_order` in `forge_env_cfg.py → ForgeEnvCfg`:
+
+```python
+obs_order: list = [
+    "fingertip_pos_rel_fixed",   # 3-dim
+    "fingertip_quat",            # 4-dim
+    "ee_linvel",                 # 3-dim
+    "ee_angvel",                 # 3-dim
+    "ft_force",                  # 3-dim  ← F/T sensor (currently ON)
+    # "force_threshold",         # 1-dim  ← currently OFF
+]
+```
+
+To **disable** F/T input, comment out `"ft_force"`:
+```python
+obs_order: list = [
+    "fingertip_pos_rel_fixed",
+    "fingertip_quat",
+    "ee_linvel",
+    "ee_angvel",
+    # "ft_force",
+]
+```
+
 ---
 
 ### Robot Initial Position (box-local frame)
