@@ -106,7 +106,7 @@ class ForgeEnvCfg(FactoryEnvCfg):
         "fingertip_quat",
         "ee_linvel",
         "ee_angvel",
-        # "ft_force",
+        "ft_force",
         # "force_threshold",
     ]
     state_order: list = [
@@ -122,7 +122,7 @@ class ForgeEnvCfg(FactoryEnvCfg):
         "fixed_quat",
         "task_prop_gains",
         "ema_factor",
-        # "ft_force",
+        "ft_force",
         "pos_threshold",
         "rot_threshold",
         # "force_threshold",
