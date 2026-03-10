@@ -61,6 +61,12 @@ class CtrlCfg:
     reset_rot_deriv_scale = 10.0
     default_task_prop_gains = [100, 100, 100, 30, 30, 30]
 
+    # Configurable robot body names — override in subclass for non-Franka robots.
+    fingertip_body_name: str = "panda_fingertip_centered"
+    left_finger_body_name: str = "panda_leftfinger"
+    right_finger_body_name: str = "panda_rightfinger"
+    force_sensor_body_name: str = "force_sensor"
+
     # Null space parameters.
     default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]
     kp_null = 10.0

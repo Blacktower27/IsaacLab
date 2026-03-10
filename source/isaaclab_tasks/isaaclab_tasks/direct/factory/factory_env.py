@@ -69,9 +69,9 @@ class FactoryEnv(DirectRLEnv):
         self.init_fixed_pos_obs_noise = torch.zeros((self.num_envs, 3), device=self.device)
 
         # Computer body indices.
-        self.left_finger_body_idx = self._robot.body_names.index("panda_leftfinger")
-        self.right_finger_body_idx = self._robot.body_names.index("panda_rightfinger")
-        self.fingertip_body_idx = self._robot.body_names.index("panda_fingertip_centered")
+        self.left_finger_body_idx = self._robot.body_names.index(self.cfg.ctrl.left_finger_body_name)
+        self.right_finger_body_idx = self._robot.body_names.index(self.cfg.ctrl.right_finger_body_name)
+        self.fingertip_body_idx = self._robot.body_names.index(self.cfg.ctrl.fingertip_body_name)
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -1032,6 +1032,21 @@ class FactoryEnv(DirectRLEnv):
         
         
         # Set _DEBUG_OBSERVE_S = 0.0 to disable.
+        # DEBUG: pause before closing gripper so you can inspect object placement.
+        # print("Debug observe...")
+        # _DEBUG_OBSERVE_S = 20.0
+        # _t = 0.0
+        # if not hasattr(self, "task_prop_gains"):
+        #     self.task_prop_gains = self.default_gains.clone()
+        #     self.task_deriv_gains = factory_utils.get_deriv_gains(self.task_prop_gains)
+        # while _t < _DEBUG_OBSERVE_S:
+        #     self.close_gripper_in_place()
+        #     self.scene.write_data_to_sim()
+        #     self.sim.step(render=True)  # render=True prevents Fabric clone failure
+        #     self.scene.update(dt=self.physics_dt)
+        #     self._compute_intermediate_values(dt=self.physics_dt)
+        #     _t += self.sim.get_physics_dt()
+        # print("Done observing, closing gripper...")
         
         # Add asset in hand randomization
         # rand_sample = torch.rand((self.num_envs, 3), dtype=torch.float32, device=self.device)

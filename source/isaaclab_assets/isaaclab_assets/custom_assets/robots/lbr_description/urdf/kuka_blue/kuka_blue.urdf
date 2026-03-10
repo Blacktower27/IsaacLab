@@ -30,7 +30,7 @@
     <!-- <origin xyz="0.5704642 -0.4159573 -0.2667773" rpy="0.0046846 -0.0042898 0.7420555"/>  -->
     <!-- <origin xyz="0 0 0" rpy="0 0 0 "/> -->
     <!-- original -->
-    <origin rpy="0.0 0.0 0.0" xyz="0.5754642 -0.4159573 -0.2417773"/>
+    <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0"/>
   </joint>
   <!-- ros_control-plugin -->
   
@@ -405,6 +405,7 @@
     <parent link="link_ee"/>
     <child link="link_tcp"/>
     <!-- <origin rpy="0 0 0" xyz="0.00051 -0.00012 0.23332"/> NO FORCE TOOL -->
-    <origin rpy="0 0 0" xyz="0.00243 0.0003 0.22498"/>
+    <!-- <origin rpy="0 0 0" xyz="0.00243 0.0003 0.22498"/> -->
+    <origin rpy="0 0 1.5708" xyz="0.00243 0.0003 0.3325"/>
   </joint>
 </robot>
