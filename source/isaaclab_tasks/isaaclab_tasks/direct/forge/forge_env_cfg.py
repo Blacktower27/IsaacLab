@@ -197,14 +197,17 @@ class ForgeKukaCtrlCfg(ForgeCtrlCfg):
     left_finger_body_name: str = "link_tcp"
     right_finger_body_name: str = "link_tcp"
     force_sensor_body_name: str = "link_ee"
+    # Lid is embedded in URDF as link_lid — skip separate held_asset.
+    held_body_name: str = "link_lid"
     # Home pose: arm roughly above the workspace.
     reset_joints: list = [0.0, 0.3, 0.0, -1.5, 0.0, 1.2, 0.0]
 
 
 @configclass
 class ForgeKukaEventCfg(EventCfg):
-    # Disable held-asset mass randomisation — the lid is part of the robot URDF.
+    # Lid is part of the robot URDF — disable all held_asset event terms.
     object_scale_mass = None
+    held_physics_material = None
 
 
 @configclass
@@ -242,7 +245,7 @@ class ForgeKukaBoxLidInsertCfg(ForgeTaskBoxLidInsertCfg):
                 solver_velocity_iteration_count=1,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
-                contact_offset=0.005,  # Distance (m) at which contact is detected before actual touch.
+                contact_offset=0.001,  # Distance (m) at which contact is detected before actual touch.
                 rest_offset=0.0,       # Resting gap (m) between surfaces; 0 = surfaces can fully touch.
             ),
         ),

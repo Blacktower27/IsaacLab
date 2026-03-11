@@ -53,7 +53,8 @@ class FactoryEnv(DirectRLEnv):
         )
 
         # Set masses and frictions.
-        factory_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
+        if hasattr(self, "_held_asset"):
+            factory_utils.set_friction(self._held_asset, self.cfg_task.held_asset_cfg.friction, self.scene.num_envs)
         factory_utils.set_friction(self._fixed_asset, self.cfg_task.fixed_asset_cfg.friction, self.scene.num_envs)
         factory_utils.set_friction(self._robot, self.cfg_task.robot_cfg.friction, self.scene.num_envs)
 
@@ -72,6 +73,8 @@ class FactoryEnv(DirectRLEnv):
         self.left_finger_body_idx = self._robot.body_names.index(self.cfg.ctrl.left_finger_body_name)
         self.right_finger_body_idx = self._robot.body_names.index(self.cfg.ctrl.right_finger_body_name)
         self.fingertip_body_idx = self._robot.body_names.index(self.cfg.ctrl.fingertip_body_name)
+        if self.cfg.ctrl.held_body_name:
+            self._held_body_idx = self._robot.body_names.index(self.cfg.ctrl.held_body_name)
 
         # Tensors for finite-differencing.
         self.last_update_timestamp = 0.0  # Note: This is for finite differencing body velocities.
@@ -115,7 +118,8 @@ class FactoryEnv(DirectRLEnv):
             self._fixed_asset = RigidObject(self.cfg_task.fixed_asset)
         else:
             self._fixed_asset = Articulation(self.cfg_task.fixed_asset)
-        self._held_asset = Articulation(self.cfg_task.held_asset)
+        if not self.cfg.ctrl.held_body_name:
+            self._held_asset = Articulation(self.cfg_task.held_asset)
         if self.cfg_task.name == "gear_mesh":
             self._small_gear_asset = Articulation(self.cfg_task.small_gear_cfg)
             self._large_gear_asset = Articulation(self.cfg_task.large_gear_cfg)
@@ -130,7 +134,8 @@ class FactoryEnv(DirectRLEnv):
             self.scene.rigid_objects["fixed_asset"] = self._fixed_asset
         else:
             self.scene.articulations["fixed_asset"] = self._fixed_asset
-        self.scene.articulations["held_asset"] = self._held_asset
+        if hasattr(self, "_held_asset"):
+            self.scene.articulations["held_asset"] = self._held_asset
         if self.cfg_task.name == "gear_mesh":
             self.scene.articulations["small_gear"] = self._small_gear_asset
             self.scene.articulations["large_gear"] = self._large_gear_asset
@@ -145,8 +150,12 @@ class FactoryEnv(DirectRLEnv):
         self.fixed_pos = self._fixed_asset.data.root_pos_w - self.scene.env_origins
         self.fixed_quat = self._fixed_asset.data.root_quat_w
 
-        self.held_pos = self._held_asset.data.root_pos_w - self.scene.env_origins
-        self.held_quat = self._held_asset.data.root_quat_w
+        if hasattr(self, "_held_body_idx"):
+            self.held_pos = self._robot.data.body_pos_w[:, self._held_body_idx] - self.scene.env_origins
+            self.held_quat = self._robot.data.body_quat_w[:, self._held_body_idx]
+        else:
+            self.held_pos = self._held_asset.data.root_pos_w - self.scene.env_origins
+            self.held_quat = self._held_asset.data.root_quat_w
 
         self.fingertip_midpoint_pos = self._robot.data.body_pos_w[:, self.fingertip_body_idx] - self.scene.env_origins
         self.fingertip_midpoint_quat = self._robot.data.body_quat_w[:, self.fingertip_body_idx]
@@ -685,12 +694,13 @@ class FactoryEnv(DirectRLEnv):
 
     def _set_assets_to_default_pose(self, env_ids):
         """Move assets to default pose before randomization."""
-        held_state = self._held_asset.data.default_root_state.clone()[env_ids]
-        held_state[:, 0:3] += self.scene.env_origins[env_ids]
-        held_state[:, 7:] = 0.0
-        self._held_asset.write_root_pose_to_sim(held_state[:, 0:7], env_ids=env_ids)
-        self._held_asset.write_root_velocity_to_sim(held_state[:, 7:], env_ids=env_ids)
-        self._held_asset.reset()
+        if hasattr(self, "_held_asset"):
+            held_state = self._held_asset.data.default_root_state.clone()[env_ids]
+            held_state[:, 0:3] += self.scene.env_origins[env_ids]
+            held_state[:, 7:] = 0.0
+            self._held_asset.write_root_pose_to_sim(held_state[:, 0:7], env_ids=env_ids)
+            self._held_asset.write_root_velocity_to_sim(held_state[:, 7:], env_ids=env_ids)
+            self._held_asset.reset()
 
         fixed_state = self._fixed_asset.data.default_root_state.clone()[env_ids]
         fixed_state[:, 0:3] += self.scene.env_origins[env_ids]
@@ -1065,13 +1075,14 @@ class FactoryEnv(DirectRLEnv):
             t2=held_asset_pos_noise,
         )
 
-        held_state = self._held_asset.data.default_root_state.clone()
-        held_state[:, 0:3] = translated_held_asset_pos + self.scene.env_origins
-        held_state[:, 3:7] = translated_held_asset_quat
-        held_state[:, 7:] = 0.0
-        self._held_asset.write_root_pose_to_sim(held_state[:, 0:7])
-        self._held_asset.write_root_velocity_to_sim(held_state[:, 7:])
-        self._held_asset.reset()
+        if hasattr(self, "_held_asset"):
+            held_state = self._held_asset.data.default_root_state.clone()
+            held_state[:, 0:3] = translated_held_asset_pos + self.scene.env_origins
+            held_state[:, 3:7] = translated_held_asset_quat
+            held_state[:, 7:] = 0.0
+            self._held_asset.write_root_pose_to_sim(held_state[:, 0:7])
+            self._held_asset.write_root_velocity_to_sim(held_state[:, 7:])
+            self._held_asset.reset()
 
         # DEBUG: pause before closing gripper so you can inspect object placement.
         # print("Debug observe...")
@@ -1098,12 +1109,13 @@ class FactoryEnv(DirectRLEnv):
         self.step_sim_no_action()
 
 
-        grasp_time = 0.0
-        while grasp_time < 0.25:
-            self.ctrl_target_joint_pos[env_ids, 7:] = 0.0  # Close gripper.
-            self.close_gripper_in_place()
-            self.step_sim_no_action()
-            grasp_time += self.sim.get_physics_dt()
+        if hasattr(self, "_held_asset"):
+            grasp_time = 0.0
+            while grasp_time < 0.25:
+                self.ctrl_target_joint_pos[env_ids, 7:] = 0.0  # Close gripper.
+                self.close_gripper_in_place()
+                self.step_sim_no_action()
+                grasp_time += self.sim.get_physics_dt()
 
         self.prev_joint_pos = self.joint_pos[:, 0:7].clone()
         self.prev_fingertip_pos = self.fingertip_midpoint_pos.clone()
