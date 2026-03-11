@@ -66,6 +66,9 @@ class CtrlCfg:
     left_finger_body_name: str = "panda_leftfinger"
     right_finger_body_name: str = "panda_rightfinger"
     force_sensor_body_name: str = "force_sensor"
+    # When non-empty, the lid is a robot body (e.g. link_lid fixed to TCP).
+    # FactoryEnv will skip creating _held_asset and read held_pos/quat from this body instead.
+    held_body_name: str = ""
 
     # Null space parameters.
     default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]

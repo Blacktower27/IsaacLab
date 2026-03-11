@@ -159,7 +159,7 @@ class ForgeBoxLidInsert(ForgeTask):
     # clear of box walls. Engage-zone initialization is geometrically infeasible:
     # any clip-in-pocket position requires lid body inside box cavity → penetration.
     # hand_init_pos: list = [0.0, 0.0, 0.05]
-    hand_init_pos: list = [0.00, 0.07, 0.043]  # [x, y, z] box-local; z used as fallback only
+    hand_init_pos: list = [0.00, 0.07, 0.034]  # [x, y, z] box-local; z used as fallback only
     # hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     # hand_init_orn = [roll, pitch, yaw] in radians.  π on roll = EE pointing down.
