@@ -1,7 +1,11 @@
 # Box-Lid Insertion Task (FORGE / IsaacLab)
 
-A Franka Panda robot grasps a yellow snap-fit lid and inserts it into a small box.
-Gym ID: **`Isaac-Forge-BoxLidInsert-Direct-v0`**
+A robot grasps a yellow snap-fit lid and inserts it into a small box.
+
+| Robot | Gym ID |
+|---|---|
+| Franka Panda | `Isaac-Forge-BoxLidInsert-Direct-v0` |
+| Kuka iiwa7 | `Isaac-Forge-BoxLidInsert-Kuka-Direct-v0` |
 
 ---
 
@@ -10,9 +14,16 @@ Gym ID: **`Isaac-Forge-BoxLidInsert-Direct-v0`**
 All commands run from the **IsaacLab root directory**.
 
 ### Train
+
 ```bash
+# Franka
 python scripts/reinforcement_learning/rl_games/train.py \
     --task Isaac-Forge-BoxLidInsert-Direct-v0 \
+    --headless
+
+# Kuka iiwa7
+python scripts/reinforcement_learning/rl_games/train.py \
+    --task Isaac-Forge-BoxLidInsert-Kuka-Direct-v0 \
     --headless
 
 # Override number of environments
@@ -34,16 +45,36 @@ Key metrics: `successes`, `logs_rew_curr_engaged`, `logs_rew_curr_success`, `log
 ---
 
 ### Play (Evaluate a Trained Policy)
-```bash
-# Auto-load best checkpoint
-python scripts/reinforcement_learning/rl_games/play.py \
-    --task Isaac-Forge-BoxLidInsert-Direct-v0 --num_envs 1
 
-# Specific checkpoint
+To run a trained checkpoint, pass the **exact path** to the `.pth` file via `--checkpoint`.
+The checkpoint file is typically located at:
+```
+logs/rl_games/Forge/<timestamp>/nn/Forge.pth
+```
+
+```bash
+# Franka — run a specific checkpoint (replace <timestamp> with your run folder)
 python scripts/reinforcement_learning/rl_games/play.py \
-    --task Isaac-Forge-BoxLidInsert-Direct-v0 --num_envs 128 \
+    --task Isaac-Forge-BoxLidInsert-Direct-v0 \
+    --num_envs 16 \
+    --checkpoint logs/rl_games/Forge/<timestamp>/nn/Forge.pth
+
+# Kuka iiwa7 — run a specific checkpoint
+python scripts/reinforcement_learning/rl_games/play.py \
+    --task Isaac-Forge-BoxLidInsert-Kuka-Direct-v0 \
+    --num_envs 16 \
+    --checkpoint logs/rl_games/Forge/<timestamp>/nn/Forge.pth
+
+# Headless evaluation (no GUI, faster)
+python scripts/reinforcement_learning/rl_games/play.py \
+    --task Isaac-Forge-BoxLidInsert-Direct-v0 \
+    --num_envs 128 \
+    --headless \
     --checkpoint logs/rl_games/Forge/<timestamp>/nn/Forge.pth
 ```
+
+> **Note:** `--task` must match the task used during training.
+> A Franka checkpoint cannot be loaded for the Kuka task and vice versa.
 
 Each step prints:
 ```
@@ -59,8 +90,13 @@ Each step prints:
 ### Visualise with Zero Agent
 Sends zero actions every step — useful to inspect randomisation and resets without a trained policy.
 ```bash
+# Franka
 python scripts/environments/zero_agent.py \
     --task Isaac-Forge-BoxLidInsert-Direct-v0 --num_envs 1
+
+# Kuka
+python scripts/environments/zero_agent.py \
+    --task Isaac-Forge-BoxLidInsert-Kuka-Direct-v0 --num_envs 1
 ```
 
 ### Visualise Success Check (Interactive)
@@ -134,8 +170,24 @@ obs_order: list = [
 
 ---
 
-### Robot Initial Position (box-local frame)
-Defined in `forge_tasks_cfg.py → ForgeBoxLidInsert`:
+### <span style="color:red">Important!</span> Robot Initial Position (box-local frame)
+
+`hand_init_pos` is the fallback starting pose when random initialisation is disabled.
+It is defined in **`forge_tasks_cfg.py → ForgeBoxLidInsert`** (line ~162):
+
+```python
+# forge_tasks_cfg.py  →  class ForgeBoxLidInsert
+hand_init_pos: list = [0.00, 0.07, 0.034]   # Kuka iiwa7
+# hand_init_pos: list = [0.00, 0.07, 0.043]  # Franka Panda
+```
+
+- **Franka Panda** — use `[0.00, 0.07, 0.043]`
+- **Kuka iiwa7** — use `[0.00, 0.07, 0.034]` (current default at line 162)
+
+There is only one `hand_init_pos` field shared by both robots; switch the value to match whichever
+robot you are training.
+
+The other random-init range parameters in the same class:
 
 | Parameter | Default | Effect |
 |---|---|---|
@@ -210,6 +262,45 @@ Edit `forge/agents/rl_games_ppo_cfg.yaml`:
 
 ---
 
+## Kuka iiwa7 Notes
+
+The Kuka variant (`Isaac-Forge-BoxLidInsert-Kuka-Direct-v0`) differs from the Franka variant in several ways:
+
+### Lid embedded in URDF
+The lid (`Lid_Yellow`) is attached as a fixed link (`link_lid`) directly in the Kuka URDF, rather than being a separate scene object that the robot grasps. This means:
+- No separate `held_asset` is spawned in the scene.
+- The lid physically participates in arm dynamics and feels insertion forces through the robot joints.
+- `ForgeKukaEventCfg` disables `object_scale_mass` and `held_physics_material` (not applicable).
+
+### Body names
+| Role | Franka body | Kuka body |
+|---|---|---|
+| Fingertip / EE tip | `panda_hand` (or similar) | `link_tcp` |
+| Force sensor | `panda_hand` | `link_ee` |
+| Held asset body | *(separate object)* | `link_lid` (in URDF) |
+
+### Joint configuration
+Initial joint angles at reset (`ForgeKukaCtrlCfg.reset_joints`):
+
+| Joint | Value (rad) |
+|---|---|
+| A1 | 0.0 |
+| A2 | 0.3 |
+| A3 | 0.0 |
+| A4 | -1.5 |
+| A5 | 0.0 |
+| A6 | 1.2 |
+| A7 | 0.0 |
+
+### Config class hierarchy (Kuka)
+```
+ForgeKukaBoxLidInsertCfg          ← forge_env_cfg.py  (robot=Kuka URDF, ctrl/events overridden)
+  └─ ForgeTaskBoxLidInsertCfg     ← forge_env_cfg.py  (assets, scene)
+       └─ ForgeBoxLidInsert       ← forge_tasks_cfg.py (hand_init_pos, thresholds, keypoints)
+```
+
+---
+
 ## File Map
 
 ```
@@ -219,19 +310,25 @@ scripts/environments/zero_agent.py                 ← Zero-action visualisation
 
 source/isaaclab_tasks/isaaclab_tasks/direct/
 ├── forge/
-│   ├── __init__.py            ← Gym registration
+│   ├── __init__.py            ← Gym registration (Franka + Kuka IDs)
 │   ├── forge_env.py           ← ForgeEnv (F/T sensor, obs noise)
-│   ├── forge_env_cfg.py       ← ForgeTaskBoxLidInsertCfg, EventCfg
-│   ├── forge_tasks_cfg.py     ← ForgeBoxLidInsert, SmallBoxCfg, LidYellowCfg
-│   └── agents/rl_games_ppo_cfg.yaml  ← PPO config
+│   ├── forge_env_cfg.py       ← ForgeTaskBoxLidInsertCfg (Franka)
+│   │                             ForgeKukaBoxLidInsertCfg (Kuka)
+│   │                             ForgeKukaCtrlCfg, ForgeKukaEventCfg
+│   ├── forge_tasks_cfg.py     ← ForgeBoxLidInsert (hand_init_pos line ~162)
+│   │                             SmallBoxCfg, LidYellowCfg
+│   └── agents/rl_games_ppo_cfg.yaml  ← PPO config (shared by both robots)
 └── factory/
     ├── factory_env.py         ← Reset logic, rewards, success checks
     ├── factory_env_cfg.py     ← Window sizes, sim params, robot config
     └── factory_utils.py       ← Keypoint / pose utilities
 
-source/isaaclab_assets/isaaclab_assets/custom_assets/box/middle/
-    ├── Small_Box.usd          ← Fixed box (kinematic)
-    └── Lid_Yellow.usd         ← Held lid (dynamic)
+source/isaaclab_assets/isaaclab_assets/custom_assets/
+├── box/middle/
+│   ├── Small_Box.usd          ← Fixed box (kinematic)
+│   └── Lid_Yellow.usd         ← Held lid (Franka only; Kuka embeds it in URDF)
+└── robots/lbr_description/urdf/kuka_blue/
+    └── kuka_blue.urdf         ← Kuka iiwa7 URDF (includes link_lid)
 ```
 
 ---
