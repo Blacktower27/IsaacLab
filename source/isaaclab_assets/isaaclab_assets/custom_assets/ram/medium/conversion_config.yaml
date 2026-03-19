@@ -1,0 +1,33 @@
+# Per-asset conversion config for Isaac Lab MeshConverter.
+# Used by: custom_assets/convert_stl_to_usd.py
+#
+# scale: STL source files are in mm → 0.001 converts to meters
+#
+# collision_approximation options:
+#   sdf                  - signed-distance-field, accurate for both static & dynamic
+#   convexDecomposition  - multiple convex hulls, best for dynamic/concave shapes
+#   triangleMesh         - exact mesh collision (static/kinematic bodies only)
+#
+# contact_offset: distance at which PhysX generates contact constraints (metres).
+#   Set to ~0.001 m for tight-fitting parts (precision insertion tasks).
+# rest_offset: separation maintained at rest. Keep at 0.0 for insertion tasks.
+
+default:
+  scale: 0.001
+  make_instanceable: false
+  collision_approximation: sdf
+  contact_offset: 0.001
+  rest_offset: 0.0
+
+
+assets:
+  Adi_Medium_RAM_Female_Raw_Uncolored.stl:
+    mass: 0.05
+    # Fixed/kinematic asset (mounted on board) — sdf gives exact cavity geometry
+    # critical for RAM insertion accuracy.
+    collision_approximation: sdf
+
+  Adi_Medium_RAM_Male_Raw_Uncolored.stl:
+    mass: 0.01
+    # Dynamic (held) asset — sdf works for dynamic bodies in Isaac Sim 4.x.
+    collision_approximation: sdf
