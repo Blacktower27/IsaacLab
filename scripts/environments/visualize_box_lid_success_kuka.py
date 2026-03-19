@@ -18,6 +18,10 @@ Keyboard controls (click the viewport once to give it focus):
   J / L              — yaw   EE +/-
   Hold Shift         — 5× speed
   R                  — reset arm to default joint pose
+  F                  — teleport virtual target to ENGAGED trigger position
+                       (lid clip Z = 28mm in box frame; clips just inside groove)
+  G                  — teleport virtual target to SUCCESS center position
+                       (lid clip Z = 25mm in box frame; clips fully seated)
 
 Coloured sphere markers (updated every frame):
   BLUE   — left  clip (lid) + left  hole (box)  [matched pair]
@@ -130,6 +134,58 @@ _vtgt_pos:          torch.Tensor | None = None  # (num_envs, 3) env-local
 _vtgt_pitch_action: float = 0.0   # action[4], range ≈ [-1, 1]
 _vtgt_yaw_action:   float = 0.0   # action[5], range  [-1, 1]
 
+# ---------------------------------------------------------------------------
+# Teleport offsets relative to the task's own success target.
+# F → ENGAGED: z_above_success mm above success Z, y_offset in env-local Y.
+# G → SUCCESS: exactly at the success target derived from the reward check.
+# ---------------------------------------------------------------------------
+_TELEPORT_ENGAGED_Z_ABOVE: float = 0.005   # 5 mm above success Z (clip at ~30 mm in box)
+_TELEPORT_ENGAGED_Y_OFF:   float = 0.040   # Y offset from box centre (tune sign)
+
+# Geometry: held_base = link_lid + [0,0,0.0188];  link_tcp = link_lid + [0,0,_GRASP_Z_OFF]
+_LID_BASE_HEIGHT = 0.0188   # LidYellowCfg.base_height
+_GRASP_Z_OFF     = 0.037    # link_tcp above link_lid (relative_pos.z)
+
+
+def _teleport_vtgt_to(inner, label: str, z_above_success: float = 0.0, y_offset: float = 0.0) -> None:
+    """Snap _vtgt_pos (OSC target) to the EE position implied by the task success target.
+
+    Uses get_target_held_base_pose — identical to the reward check — so the target
+    automatically tracks the box even when position randomisation is enabled.
+
+    Chain:  target_held_base_pos  (from reward)
+            → link_lid  = held_base − [0,0, LID_BASE_HEIGHT]
+            → link_tcp  = link_lid  + [0,0, GRASP_Z_OFF]
+            → EE target = link_tcp  + [0, y_offset, z_above_success]
+    """
+    from isaaclab_tasks.direct.factory import factory_utils as _futils
+
+    global _vtgt_pos
+    device   = inner.device
+    num_envs = inner.num_envs
+
+    target_held_base_pos, _ = _futils.get_target_held_base_pose(
+        inner.fixed_pos, inner.fixed_quat,
+        inner.cfg_task.name, inner.cfg_task.fixed_asset_cfg,
+        num_envs, device,
+    )
+
+    ee_pos = target_held_base_pos.clone()
+    ee_pos[:, 1] += y_offset
+    ee_pos[:, 2] += -_LID_BASE_HEIGHT + _GRASP_Z_OFF + z_above_success
+    _vtgt_pos = ee_pos.clone()
+
+    # Temporarily zero dead-zone so OSC can converge to mm-level precision.
+    # Without this: dead_zone ≈ 5 N → arm stops ~8.9 mm from target (5/565 N/m).
+    inner.dead_zone_thresholds = torch.zeros((inner.num_envs, 6), device=inner.device)
+
+    print(
+        f"[TELEPORT → {label}]"
+        f"  EE target (env-local): X={ee_pos[0,0].item()*1000:.1f}"
+        f"  Y={ee_pos[0,1].item()*1000:.1f}"
+        f"  Z={ee_pos[0,2].item()*1000:.1f} mm"
+    )
+
 
 def _init_virtual_target(inner) -> None:
     """Initialise virtual target from current EE state (call after env step/reset)."""
@@ -161,9 +217,24 @@ def _compute_actions(inner) -> torch.Tensor:
 
     _vtgt_pos = _vtgt_pos + dp.unsqueeze(0)  # (num_envs, 3)
 
-    fixed_pos_action_frame = inner.fixed_pos_obs_frame + inner.init_fixed_pos_obs_noise  # (N,3)
-    pos_action_bounds = torch.tensor(inner.cfg.ctrl.pos_action_bounds, device=device)    # (3,)
-    pos_action = (_vtgt_pos - fixed_pos_action_frame) / pos_action_bounds                # (N,3)
+    # Clamp vtgt to stay within ±1 action-bound of the current EE.
+    # Without this, holding a key while contact blocks the arm lets vtgt drift
+    # arbitrarily far, requiring equally many key-presses in the opposite direction
+    # before the OSC actually reverses — making the arm appear permanently stuck.
+    pos_bounds = torch.tensor(inner.cfg.ctrl.pos_action_bounds, device=device)
+    _vtgt_pos = torch.clamp(
+        _vtgt_pos,
+        inner.fingertip_midpoint_pos - pos_bounds,
+        inner.fingertip_midpoint_pos + pos_bounds,
+    )
+
+    # FORGE action semantics: action = (vtgt - frame) / bounds, so that
+    #   ctrl_target = frame + action * bounds = vtgt   (direct target)
+    #   actual delta = clip(vtgt - EE, -threshold, +threshold)
+    # The previous formula (vtgt - EE) / threshold introduced an offset term
+    # (frame_z - EE_z) that flipped the OSC direction when EE was above frame.
+    frame     = inner.fixed_pos_obs_frame + inner.init_fixed_pos_obs_noise  # (N, 3)
+    pos_action = (_vtgt_pos - frame) / pos_bounds                            # (N, 3)
 
     # ---- Rotation --------------------------------------------------------
     # pitch: action[4] * rot_action_bounds[1] = pitch_target (rad, bolt frame).
@@ -408,6 +479,7 @@ def main():
     print(
         "\n[CONTROLS]  Arrow=XY  Q/E=Z  I/K=pitch  J/L=yaw  "
         "Shift=3×speed  R=reset arm\n"
+        "[TELEPORT]  F=ENGAGED position  G=SUCCESS center position\n"
         "[INFO] Virtual-target control — keys move a target pose; FORGE OSC tracks it.\n"
         "[INFO] Roll is fixed by the controller; U/O have no effect.\n"
     )
@@ -424,15 +496,34 @@ def main():
 
     step = 0
     _r_pressed_last_frame = False
+    _f_pressed_last_frame = False
+    _g_pressed_last_frame = False
+    _diag_steps = 0   # counts down after F/G press; prints gap each step
 
     while simulation_app.is_running():
         with torch.inference_mode():
 
             r_now = _key(Ki.R)
+            f_now = _key(Ki.F)
+            g_now = _key(Ki.G)
 
             if r_now:
                 inner._robot.write_joint_state_to_sim(_reset_joint_pos, _reset_joint_vel)
                 inner._robot.set_joint_position_target(_reset_joint_pos)
+
+            # Leading-edge teleport: F → ENGAGED position, G → SUCCESS center.
+            # ENGAGED: clip_z_box = 0.028 m (top of engaged window [0.018, 0.030]).
+            # SUCCESS: clip_z_box = 0.025 m (center of success window [0.021, 0.029]).
+            if f_now and not _f_pressed_last_frame:
+                _teleport_vtgt_to(inner, label="ENGAGED",
+                                  z_above_success=_TELEPORT_ENGAGED_Z_ABOVE,
+                                  y_offset=_TELEPORT_ENGAGED_Y_OFF)
+                _diag_steps = 100
+            if g_now and not _g_pressed_last_frame:
+                _teleport_vtgt_to(inner, label="SUCCESS")
+                _diag_steps = 100
+            _f_pressed_last_frame = f_now
+            _g_pressed_last_frame = g_now
 
             actions = _compute_actions(inner)
 
@@ -446,6 +537,27 @@ def main():
             _r_pressed_last_frame = r_now
 
             _draw_clip_hole_markers(inner)
+
+            # Diagnostic: after F/G teleport, print gap from success target each step.
+            if _diag_steps > 0:
+                from isaaclab_tasks.direct.factory import factory_utils as _futils
+                tgt, _ = _futils.get_target_held_base_pose(
+                    inner.fixed_pos, inner.fixed_quat,
+                    inner.cfg_task.name, inner.cfg_task.fixed_asset_cfg,
+                    inner.num_envs, inner.device,
+                )
+                # held_base = held_pos + [0,0,0.0188]
+                held_base_z = inner.held_pos[0, 2].item() + 0.0188
+                tgt_z       = tgt[0, 2].item()
+                ee_pos      = inner.fingertip_midpoint_pos[0].cpu()
+                vtgt        = _vtgt_pos[0].cpu() if _vtgt_pos is not None else ee_pos
+                print(
+                    f"  [diag {_diag_steps:3d}]"
+                    f"  held_base Z={held_base_z*1000:+7.2f} mm  tgt Z={tgt_z*1000:+7.2f} mm"
+                    f"  gap={( held_base_z - tgt_z)*1000:+6.2f} mm"
+                    f"  | EE Z={ee_pos[2]*1000:+7.2f}  vtgt Z={vtgt[2]*1000:+7.2f}"
+                )
+                _diag_steps -= 1
 
             engaged   = inner._get_curr_successes(success_threshold=0.9)
             successes = inner._get_curr_successes(success_threshold=inner.cfg_task.success_threshold)

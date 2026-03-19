@@ -202,6 +202,41 @@ class ForgeKukaCtrlCfg(ForgeCtrlCfg):
     # Home pose: arm roughly above the workspace.
     reset_joints: list = [0.0, 0.3, 0.0, -1.5, 0.0, 1.2, 0.0]
 
+    # ---------------------------------------------------------------------------
+    # Null-space controller target pose (must match Kuka's actual home pose).
+    # The base CtrlCfg default is Franka's joint zero position:
+    #   default_dof_pos_tensor = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]
+    # Using that value for Kuka causes the null-space controller to continuously
+    # pull joints toward Franka's home pose, generating counterproductive torques
+    # that partially cancel the OSC task-space force — especially noticeable during
+    # the final press-in phase when sustained downward force is needed.
+    # Override with Kuka's reset pose (same values as reset_joints above).
+    # ---------------------------------------------------------------------------
+    # [ORIGINAL Franka value, kept for reference]:
+    # default_dof_pos_tensor: list = [-1.3003, -0.4015, 1.1791, -2.1493, 0.4001, 1.9425, 0.4754]
+    default_dof_pos_tensor: list = [0.0, 0.3, 0.0, -1.5, 0.0, 1.2, 0.0]
+
+    # ---------------------------------------------------------------------------
+    # Task-space proportional gains (Cartesian force = kp * pos_error).
+    # The base ForgeCtrlCfg default was tuned for Franka:
+    #   default_task_prop_gains = [565.0, 565.0, 565.0, 28.0, 28.0, 28.0]
+    # Kuka has a different kinematic structure (longer links, different mass
+    # distribution), so the same gains may produce insufficient end-effector force.
+    # Raised the translational gains slightly to compensate; rotation gains kept.
+    # ---------------------------------------------------------------------------
+    # [ORIGINAL Franka-tuned value, kept for reference]:
+    default_task_prop_gains: list = [565.0, 565.0, 565.0, 28.0, 28.0, 28.0]
+    # default_task_prop_gains: list = [2500.0, 2500.0, 2500.0, 28.0, 28.0, 28.0]
+
+    # ---------------------------------------------------------------------------
+    # Per-joint torque clamp for Kuka iiwa7.
+    # The base CtrlCfg default (100 N·m) was sized for Franka (87/12 N·m limits).
+    # Kuka's URDF specifies effort="200" on all 7 joints, so raise the clamp to
+    # match — this restores the full torque budget and lets the OSC actually
+    # deliver the insertion force computed from task_prop_gains above.
+    # ---------------------------------------------------------------------------
+    dof_torque_clamp: float = 200.0  # [N·m] matches Kuka iiwa7 URDF effort limit
+
 
 @configclass
 class ForgeKukaEventCfg(EventCfg):
@@ -245,7 +280,7 @@ class ForgeKukaBoxLidInsertCfg(ForgeTaskBoxLidInsertCfg):
                 solver_velocity_iteration_count=1,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
-                contact_offset=0.001,  # Distance (m) at which contact is detected before actual touch.
+                contact_offset=0.005,  # Distance (m) at which contact is detected before actual touch.
                 rest_offset=0.0,       # Resting gap (m) between surfaces; 0 = surfaces can fully touch.
             ),
         ),

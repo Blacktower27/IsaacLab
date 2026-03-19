@@ -422,16 +422,17 @@
         <mesh filename="/home/blacktower27/code/python_code/CAM/IsaacLab/source/isaaclab_assets/isaaclab_assets/custom_assets/box/middle/Lid_Yellow.usd" scale="1 1 1"/>
       </geometry>
     </visual>
-    <collision>
+    <!-- <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <mesh filename="/home/blacktower27/code/python_code/CAM/IsaacLab/source/isaaclab_assets/isaaclab_assets/custom_assets/box/middle/Lid_Yellow.usd" scale="1 1 1"/>
       </geometry>
-    </collision>
+    </collision> -->
   </link>
   <joint name="joint_lid" type="fixed">
     <parent link="link_tcp"/>
     <child link="link_lid"/>
     <origin rpy="-2.5307 0 -1.5708" xyz="-0.0094 0.002 0.035"/>
+    <!-- <origin rpy="0 0 0" xyz="0 0 0"/> -->
   </joint>
 </robot>
