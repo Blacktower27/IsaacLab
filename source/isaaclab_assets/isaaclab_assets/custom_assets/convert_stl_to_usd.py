@@ -156,6 +156,10 @@ def resolve_asset_cfg(fname: str, dir_cfg: dict) -> dict:
         "error_percentage": merged.get("error_percentage", None),
         "shrink_wrap": merged.get("shrink_wrap", None),
         "min_thickness": merged.get("min_thickness", None),
+        # Optional post-conversion rotation: [rx, ry, rz] in degrees (XYZ Euler).
+        # Applied after scale so the geometry is reoriented in world space.
+        # Example: [0, -90, 0] rotates +X → +Z (for assets modeled with X-up).
+        "rotation": merged.get("rotation", None),
     }
 
 
@@ -259,6 +263,30 @@ def convert_one(stl_path: str, usd_path: str, cfg: dict) -> None:
     else:
         print("[warn] Could not find a prim to apply ArticulationRootAPI — "
               "apply it manually in USD Composer if needed.")
+
+    # Apply post-conversion rotation if specified in config.
+    # xformOpOrder = [rotateXYZ, ...existing ops (scale)...]
+    # → transform = rotate * scale → applied to point: rotate(scale(p))
+    # i.e. scale first (mm→m), then rotate. Correct for reorientation.
+    rotation_deg = cfg.get("rotation")
+    if rotation_deg is not None:
+        from pxr import Gf, UsdGeom  # noqa: E402 (already imported implicitly via pxr)
+        prim_to_rotate = (
+            articulation_root_prim
+            if articulation_root_prim and articulation_root_prim.IsValid()
+            else stage.GetDefaultPrim()
+        )
+        xformable = UsdGeom.Xformable(prim_to_rotate)
+        existing_ops = xformable.GetOrderedXformOps()
+        rotate_op = xformable.AddXformOp(
+            UsdGeom.XformOp.TypeRotateXYZ,
+            UsdGeom.XformOp.PrecisionFloat,
+        )
+        rotate_op.Set(Gf.Vec3f(*rotation_deg))
+        xformable.SetXformOpOrder([rotate_op] + existing_ops)
+        stage.GetRootLayer().Save()
+        print(f"[rotation] Applied rotateXYZ {rotation_deg} deg to "
+              f"<{prim_to_rotate.GetPath()}>")
 
     print(f"[done]    -> {actual_usd_path}\n")
 
