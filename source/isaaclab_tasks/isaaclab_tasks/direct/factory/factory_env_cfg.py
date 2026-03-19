@@ -75,6 +75,17 @@ class CtrlCfg:
     kp_null = 10.0
     kd_null = 6.3246
 
+    # ---------------------------------------------------------------------------
+    # OSC output torque clamp (applied after Jacobian transpose mapping).
+    # The original hard-coded value of 100 N·m was tuned for Franka, whose
+    # joint effort limits are 87 N·m (joints 1-4) and 12 N·m (joints 5-7).
+    # For robots with higher-rated actuators (e.g. Kuka iiwa7: 200 N·m per
+    # joint), this clamp artificially caps half the available torque budget,
+    # reducing the achievable end-effector insertion force.
+    # Override in a subclass to match the target robot's actual effort limits.
+    # ---------------------------------------------------------------------------
+    dof_torque_clamp: float = 100.0  # [N·m] symmetric clamp on each joint torque
+
 
 @configclass
 class FactoryEnvCfg(DirectRLEnvCfg):

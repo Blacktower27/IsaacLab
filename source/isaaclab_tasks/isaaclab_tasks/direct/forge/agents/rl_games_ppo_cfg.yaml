@@ -79,7 +79,7 @@ params:
     entropy_coef: 0.0
     truncate_grads: True
     e_clip: 0.2
-    horizon_length: 256  # used to be 128
+    horizon_length: 128  
     minibatch_size: 512  # batch size = num_envs * horizon_length; minibatch_size = batch_size / num_minibatches
     mini_epochs: 4
     critic_coef: 2

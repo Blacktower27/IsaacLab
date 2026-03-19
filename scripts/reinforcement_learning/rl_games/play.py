@@ -37,6 +37,19 @@ parser.add_argument(
     help="When no checkpoint provided, use the last saved model. Otherwise use the best saved model.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--record_csv",
+    type=str,
+    default=None,
+    metavar="PATH",
+    help="If set, record EE pose, joint states, and box pose (all in robot base frame) to this CSV file.",
+)
+parser.add_argument(
+    "--record_env_idx",
+    type=int,
+    default=0,
+    help="Environment index to record (default: 0).",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -54,6 +67,7 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 
+import csv
 import math
 import os
 import random
@@ -72,8 +86,11 @@ from isaaclab.envs import (
     ManagerBasedRLEnvCfg,
     multi_agent_to_single_agent,
 )
+import isaacsim.core.utils.torch as torch_utils
+
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.math import quat_apply_inverse
 
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -186,6 +203,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dt = env.unwrapped.step_dt
 
+    # --- CSV recording setup ---
+    csv_file = None
+    csv_writer = None
+    episode_start_time = None  # tracks sim_time at the start of each episode
+    if args_cli.record_csv:
+        csv_path = os.path.abspath(args_cli.record_csv)
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        csv_file = open(csv_path, "w", newline="")
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow([
+            "episode_time",
+            "ee_x", "ee_y", "ee_z", "ee_roll", "ee_pitch", "ee_yaw",
+            "A1", "A2", "A3", "A4", "A5", "A6", "A7",
+            "box_x", "box_y", "box_z", "box_roll", "box_pitch", "box_yaw",
+        ])
+        print(f"[INFO] Recording trajectory to: {csv_path}  (env_idx={args_cli.record_env_idx})")
+
     # reset environment
     obs = env.reset()
     if isinstance(obs, dict):
@@ -217,6 +251,65 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # Print success prediction and true geometric success each step.
             base_env = env.unwrapped
+
+            # --- CSV recording ---
+            if csv_writer is not None:
+                i = args_cli.record_env_idx
+                robot = base_env._robot
+                scene = base_env.scene
+
+                # Robot base pose (world frame)
+                robot_base_pos_w = robot.data.root_pos_w[i]   # [3]
+                robot_base_quat_w = robot.data.root_quat_w[i]  # [4] wxyz
+
+                # EE: fingertip_midpoint_pos is already (pos_world - env_origin)
+                ee_pos_env = base_env.fingertip_midpoint_pos[i]
+                ee_quat_w = base_env.fingertip_midpoint_quat[i]
+
+                # Robot base position in same env-local frame
+                robot_base_pos_env = robot_base_pos_w - scene.env_origins[i]
+
+                # EE displacement from robot base (world orientation), then rotate into base frame
+                ee_pos_rel = (ee_pos_env - robot_base_pos_env).unsqueeze(0)
+                ee_pos_base = quat_apply_inverse(robot_base_quat_w.unsqueeze(0), ee_pos_rel).squeeze(0)
+                # EE orientation in robot base frame: q_base^* ⊗ q_world
+                ee_quat_base = torch_utils.quat_mul(
+                    torch_utils.quat_conjugate(robot_base_quat_w.unsqueeze(0)),
+                    ee_quat_w.unsqueeze(0),
+                ).squeeze(0)
+                ee_r, ee_p, ee_y = torch_utils.get_euler_xyz(ee_quat_base.unsqueeze(0))
+
+                # Joint positions (7 DOF)
+                joint_pos_np = base_env.joint_pos[i, :7].cpu().numpy()
+
+                # Box: fixed_pos is (pos_world - env_origin), fixed_quat is world orientation
+                box_pos_env = base_env.fixed_pos[i]
+                box_quat_w = base_env.fixed_quat[i]
+                box_pos_rel = (box_pos_env - robot_base_pos_env).unsqueeze(0)
+                box_pos_base = quat_apply_inverse(robot_base_quat_w.unsqueeze(0), box_pos_rel).squeeze(0)
+                box_quat_base = torch_utils.quat_mul(
+                    torch_utils.quat_conjugate(robot_base_quat_w.unsqueeze(0)),
+                    box_quat_w.unsqueeze(0),
+                ).squeeze(0)
+                box_r, box_p, box_yaw = torch_utils.get_euler_xyz(box_quat_base.unsqueeze(0))
+
+                sim_time = float(robot._data._sim_timestamp)
+                # Reset episode clock on first step or when this env was done/reset
+                i_done = bool(dones[i].item()) if torch.is_tensor(dones[i]) else bool(dones[i])
+                if episode_start_time is None or i_done:
+                    episode_start_time = sim_time
+                episode_time = sim_time - episode_start_time
+
+                ee_xyz = ee_pos_base.cpu().numpy()
+                box_xyz = box_pos_base.cpu().numpy()
+                csv_writer.writerow([
+                    f"{episode_time:.6f}",
+                    f"{ee_xyz[0]:.6f}", f"{ee_xyz[1]:.6f}", f"{ee_xyz[2]:.6f}",
+                    f"{float(ee_r[0]):.6f}", f"{float(ee_p[0]):.6f}", f"{float(ee_y[0]):.6f}",
+                    *[f"{v:.6f}" for v in joint_pos_np],
+                    f"{box_xyz[0]:.6f}", f"{box_xyz[1]:.6f}", f"{box_xyz[2]:.6f}",
+                    f"{float(box_r[0]):.6f}", f"{float(box_p[0]):.6f}", f"{float(box_yaw[0]):.6f}",
+                ])
             if actions.shape[-1] > 6:
                 success_pred = (actions[:, 6] + 1) / 2
                 pred_str = (f"pred={success_pred.mean().item():.3f} "
@@ -266,6 +359,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    # close CSV file if recording
+    if csv_file is not None:
+        csv_file.close()
+        print(f"[INFO] Trajectory saved to: {os.path.abspath(args_cli.record_csv)}")
 
     # close the simulator
     env.close()

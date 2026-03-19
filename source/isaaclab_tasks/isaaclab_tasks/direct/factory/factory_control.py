@@ -97,7 +97,10 @@ def compute_dof_torque(
     dof_torque[:, 0:7] += torque_null.squeeze(-1)
 
     # TODO: Verify it's okay to no longer do gripper control here.
-    dof_torque = torch.clamp(dof_torque, min=-100.0, max=100.0)
+    # Clamp joint torques to the robot's rated effort limit (cfg.ctrl.dof_torque_clamp).
+    # The default (100 N·m) matches Franka's capability; override for other robots.
+    clamp = cfg.ctrl.dof_torque_clamp
+    dof_torque = torch.clamp(dof_torque, min=-clamp, max=clamp)
     return dof_torque, task_wrench
 
 

@@ -158,7 +158,7 @@ class ForgeBoxLidInsert(ForgeTask):
     # hand_init_pos[2] = 0.05 m: lid body bottom sits ~20 mm above box top,
     # clear of box walls. Engage-zone initialization is geometrically infeasible:
     # any clip-in-pocket position requires lid body inside box cavity → penetration.
-    # hand_init_pos: list = [0.0, 0.0, 0.05]
+    # hand_init_pos: list = [0.00, 0.07, 0.043] #for franka
     hand_init_pos: list = [0.00, 0.07, 0.034]  # [x, y, z] box-local; z used as fallback only
     # hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
@@ -192,11 +192,13 @@ class ForgeBoxLidInsert(ForgeTask):
     held_asset_pos_noise: list = [0.003, 0.003, 0.003]
     # held_asset_rot_init = base yaw of the lid in the flipped fingertip frame.
     # 90° aligns the lid's long axis with the robot's approach direction.
-    held_asset_rot_init: float = 90.0
+    held_asset_rot_init: float = 90.0# for franka
+    # held_asset_rot_init: float = 0.0
     # held_asset_rot_offset = additional [roll, pitch, yaw] in degrees on top of
     # held_asset_rot_init.  pitch=35° tilts the lid slightly forward so the handle
     # clears the finger pads during the closing step.
-    held_asset_rot_offset: list = [0.0, 35.0, 0.0]
+    held_asset_rot_offset: list = [0.0, 35.0, 0.0]# for franka
+    # held_asset_rot_offset: list = [0.0,0, 0.0]
     # held_asset_rot_offset: list = [0.0, 0.0, 0.0]
     # held_asset_pos_offset = fine-tune translation [x, y, z] in the flipped
     # fingertip frame (metres).  y=0.02 shifts the lid 20 mm "inward" so the
