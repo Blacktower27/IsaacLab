@@ -18,8 +18,8 @@ default:
   collision_approximation: sdf
   contact_offset: 0.001
   rest_offset: 0.0
-  # STL modeled with X-up → rotate -90° around Y to map +X → +Z (Isaac Sim Z-up)
-  rotation: [0, -90, 0]
+  # STL geometry already rotated in-place (X-up corrected → Z-up)
+  rotation: null
 
 assets:
   Adi_Medium_RJ45_Female_Raw_Colored.stl:

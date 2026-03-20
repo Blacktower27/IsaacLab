@@ -16,6 +16,36 @@ def get_keypoint_offsets(num_keypoints, device):
     return keypoint_offsets
 
 
+def get_rj45_tip_keypoint_offsets(device):
+    """5 keypoints spread across the RJ45 male connector face (held-base / tip frame).
+
+    The held_base for rj45_insert tracks the connector TIP (sim_Z = -13.98 mm from
+    the USD origin), so held_base frame has Z=0 at the tip face.
+
+    Offsets below are derived from the male plug STL bounds after 0.001 m/mm scale:
+        X ∈ [-0.0292,  0.0083]  (40 mm wide)
+        Y ∈ [ 0.0006,  0.0188]  (18.2 mm deep)
+        Z =  0.0              (tip face plane)
+
+    The same offsets are applied to both the held asset (plug tip) and the target
+    (socket opening, via target_held_base_quat/pos).  At the assembled state the two
+    frames coincide → keypoint_dist → 0.
+
+    Returns: (5, 3) tensor of XYZ offsets in the tip frame.
+    """
+    return torch.tensor(
+        [
+            [-0.0105,  0.0097,  0.0],  # face centre
+            [-0.0292,  0.0188,  0.0],  # left-front corner
+            [ 0.0083,  0.0188,  0.0],  # right-front corner
+            [-0.0292,  0.0006,  0.0],  # left-back corner
+            [ 0.0083,  0.0006,  0.0],  # right-back corner
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
 def get_deriv_gains(prop_gains, rot_deriv_scale=1.0):
     """Set robot gains using critical damping."""
     deriv_gains = 2 * torch.sqrt(prop_gains)
@@ -68,6 +98,13 @@ def get_held_base_pos_local(task_name, fixed_asset_cfg, num_envs, device):
         # the surface that must reach the box top for a successful insertion.
         # This value is also stored in LidYellowCfg.base_height for reference.
         held_base_z_offset = 0.0188  # = LidYellowCfg.base_height
+    elif task_name == "rj45_insert":
+        # [CUSTOM] RJ45 male plug: the connector tip (insertion end) sits BELOW
+        # the USD prim origin.  After the -90° Y rotation applied during STL→USD
+        # conversion (X-up → Z-up), the connector tip is at sim_Z = -13.98 mm.
+        # Shifting by -0.01398 transforms the tracked reference from the USD root
+        # to the physical connector tip — the face that must reach the socket opening.
+        held_base_z_offset = -0.01398  # = RJ45MaleCfg.base_height (negative → tip below origin)
     else:
         raise NotImplementedError("Task not implemented")
 
@@ -119,6 +156,23 @@ def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg,
         # when the lid was resting ON TOP of the box, not inserted inside it.
         _LID_BASE_HEIGHT = 0.0188  # must match LidYellowCfg.base_height
         fixed_success_pos_local[:, 2] = _LID_BASE_HEIGHT
+    elif task_name == "rj45_insert":
+        # [CUSTOM] RJ45 insertion geometry (values in metres, scale ×0.001):
+        #
+        # Female socket (fixed): USD origin is 22.23 mm above the socket base.
+        #   Socket opening (top face) is at female-local sim_Z = +29.22 mm = 0.02922 m.
+        #
+        # Male plug (held): connector TIP is at male-local sim_Z = -13.98 mm (tracked
+        #   as held_base via the -0.01398 offset in get_held_base_pos_local).
+        #
+        # Target: the connector tip should reach the socket opening level.
+        #   (expressed in female's local frame; tf_combine adds fixed_pos in world frame).
+        #
+        # NOTE: keypoint reward for rj45_insert does NOT use this target — it uses
+        # per-episode random body keypoints sampled at reset (see _reset_idx / _get_factory_rew_dict).
+        # This value is kept for visualisation (visualize_rj45_success_kuka.py) and
+        # any code that calls get_target_held_base_pose outside of keypoint computation.
+        fixed_success_pos_local[:, 2] = fixed_asset_cfg.height  # = 0.02922 m (socket opening)
     else:
         raise NotImplementedError("Task not implemented")
     fixed_success_quat_local = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).repeat(num_envs, 1)

@@ -60,3 +60,23 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
 )
+
+gym.register(
+    id="Isaac-Forge-RJ45Insert-Direct-v0",
+    entry_point=f"{__name__}.forge_env:ForgeEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.forge_env_cfg:ForgeTaskRJ45InsertCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Forge-RJ45Insert-Kuka-Direct-v0",
+    entry_point=f"{__name__}.forge_env:ForgeEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.forge_env_cfg:ForgeKukaRJ45InsertCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+    },
+)
