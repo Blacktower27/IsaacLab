@@ -24,7 +24,7 @@ _KUKA_URDF = _os.path.normpath(
 )
 
 from .forge_events import randomize_dead_zone
-from .forge_tasks_cfg import ForgeBoxLidInsert, ForgeGearMesh, ForgeNutThread, ForgePegInsert, ForgeTask
+from .forge_tasks_cfg import ForgeBoxLidInsert, ForgeGearMesh, ForgeNutThread, ForgePegInsert, ForgeRJ45Insert, ForgeTask
 
 OBS_DIM_CFG.update({"force_threshold": 1, "ft_force": 3})
 
@@ -307,6 +307,113 @@ class ForgeKukaBoxLidInsertCfg(ForgeTaskBoxLidInsertCfg):
                 armature=0.0,          # Rotor inertia; 0 = ignored.
                 effort_limit_sim=200.0,   # Torque limit (Nm) in simulation; rough estimate, varies per joint on real iiwa7.
                 velocity_limit_sim=3.15,  # Joint velocity limit (rad/s), ~180 deg/s.
+            ),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# [CUSTOM] RJ45 insertion task — environment configs.
+#
+# Two variants:
+#   ForgeTaskRJ45InsertCfg      — Franka (separate held_asset grasping approach)
+#   ForgeKukaRJ45InsertCfg      — Kuka iiwa7 (RJ45 male embedded as link_rj45)
+#
+# Registered gym IDs:
+#   Isaac-Forge-RJ45Insert-Direct-v0
+#   Isaac-Forge-RJ45Insert-Kuka-Direct-v0
+# ---------------------------------------------------------------------------
+
+_KUKA_RJ45_URDF = _os.path.normpath(
+    _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        "../../../../isaaclab_assets/isaaclab_assets/custom_assets/robots"
+        "/lbr_description/urdf/kuka_blue/kuka_blue_rj45.urdf",
+    )
+)
+
+
+@configclass
+class ForgeTaskRJ45InsertCfg(ForgeEnvCfg):
+    task_name = "rj45_insert"
+    task = ForgeRJ45Insert()
+    episode_length_s = 10.0
+
+
+@configclass
+class ForgeKukaRJ45CtrlCfg(ForgeKukaCtrlCfg):
+    # RJ45 male is embedded in the URDF as link_rj45.
+    # factory_env reads self.held_pos from this robot body instead of a separate asset.
+    held_body_name: str = "link_rj45"
+
+
+@configclass
+class ForgeKukaRJ45EventCfg(ForgeKukaEventCfg):
+    # RJ45 male is part of the robot URDF — disable held_asset event terms.
+    object_scale_mass = None
+    held_physics_material = None
+
+
+@configclass
+class ForgeKukaRJ45InsertCfg(ForgeTaskRJ45InsertCfg):
+    task_name = "rj45_insert"
+    ctrl: ForgeKukaRJ45CtrlCfg = ForgeKukaRJ45CtrlCfg()
+    events: ForgeKukaRJ45EventCfg = ForgeKukaRJ45EventCfg()
+
+    robot: ArticulationCfg = ArticulationCfg(
+        prim_path="/World/envs/env_.*/Robot",
+        spawn=sim_utils.UrdfFileCfg(
+            asset_path=_KUKA_RJ45_URDF,
+            fix_base=True,
+            merge_fixed_joints=False,
+            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+            ),
+            activate_contact_sensors=True,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                max_depenetration_velocity=5.0,
+                linear_damping=0.0,
+                angular_damping=0.0,
+                max_linear_velocity=1000.0,
+                max_angular_velocity=3666.0,
+                enable_gyroscopic_forces=True,
+                solver_position_iteration_count=192,
+                solver_velocity_iteration_count=1,
+                max_contact_impulse=1e32,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                solver_position_iteration_count=192,
+                solver_velocity_iteration_count=1,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            joint_pos={
+                "A1": 0.0,
+                "A2": 0.3,
+                "A3": 0.0,
+                "A4": -1.5,
+                "A5": 0.0,
+                "A6": 1.2,
+                "A7": 0.0,
+            },
+            pos=(0.0, 0.0, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+        actuators={
+            "kuka_arm": ImplicitActuatorCfg(
+                joint_names_expr=["A[1-7]"],
+                stiffness=0.0,
+                damping=0.0,
+                friction=0.0,
+                armature=0.0,
+                effort_limit_sim=200.0,
+                velocity_limit_sim=3.15,
             ),
         },
     )

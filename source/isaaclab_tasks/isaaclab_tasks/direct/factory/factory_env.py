@@ -103,6 +103,13 @@ class FactoryEnv(DirectRLEnv):
             self.kp_lid_local = torch.zeros((self.num_envs, n, 3), device=self.device)
             self.kp_box_local = torch.zeros((self.num_envs, n, 3), device=self.device)
 
+        # [CUSTOM] Per-episode keypoints for rj45_insert (sampled once per reset).
+        # At full insertion the male plug USD origin coincides with the female socket USD origin,
+        # so using the SAME local-frame offsets for both objects gives keypoint_dist → 0 at success.
+        if self.cfg_task.name == "rj45_insert":
+            _N_RJ45_KP = 5
+            self.kp_rj45_local = torch.zeros((self.num_envs, _N_RJ45_KP, 3), device=self.device)
+
     def _setup_scene(self):
         """Initialize simulation scene."""
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -1.05))
@@ -504,6 +511,76 @@ class FactoryEnv(DirectRLEnv):
             curr_successes = (
                 left_x_ok & left_y_ok & left_z_ok & right_x_ok & right_y_ok & right_z_ok
             )
+        elif self.cfg_task.name == "rj45_insert":
+            # [CUSTOM] RJ45 insertion — two distinct checks dispatched by threshold value:
+            #
+            #   engage_threshold  > 1.0  (e.g. 2.0)  → ENGAGE: XY alignment + yaw + tilt
+            #   success_threshold ≤ 1.0  (e.g. 0.1)  → SUCCESS: tip inside socket (sustained)
+            #
+            # NOTE: get_target_held_base_pose now returns the FULLY INSERTED position
+            # (not the socket opening) so that keypoint reward has a gradient all the
+            # way through insertion.  For engage/success we need z_disp relative to the
+            # socket OPENING, so recompute it here.
+            #   z_disp_opening = tip_z - socket_opening_z
+            #   z_disp_opening < 0  → tip has passed through socket opening → inside socket
+            ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).expand(self.num_envs, -1)
+            socket_opening_local = torch.zeros((self.num_envs, 3), device=self.device)
+            socket_opening_local[:, 2] = fixed_cfg.height  # opening in socket local frame
+            _, socket_opening_world = torch_utils.tf_combine(
+                self.fixed_quat, self.fixed_pos, ident_q, socket_opening_local
+            )
+            z_disp = held_base_pos[:, 2] - socket_opening_world[:, 2]
+            xy_dist = torch.linalg.vector_norm(
+                socket_opening_world[:, 0:2] - held_base_pos[:, 0:2], dim=1
+            )
+
+            if success_threshold > 1.0:
+                # ── ENGAGE check ──────────────────────────────────────────────────────
+                # Fire when XY is aligned and orientation is correct.
+                # Z is intentionally unconstrained: engage should fire even when the
+                # plug is well above the socket, rewarding the policy for aligning early
+                # and maintaining alignment during the descent.
+                #
+                # 1. XY: tip centre within 4 mm of socket opening centre.
+                _XY_TOL = 0.004
+                is_xy = xy_dist < _XY_TOL
+
+                # 2. Yaw: plug yaw should match socket yaw within ±20°.
+                _, _, plug_yaw = torch_utils.get_euler_xyz(self.held_quat)
+                _, _, sock_yaw = torch_utils.get_euler_xyz(self.fixed_quat)
+                yaw_diff = (plug_yaw - sock_yaw + torch.pi) % (2 * torch.pi) - torch.pi
+                is_yaw = yaw_diff.abs() < 0.349  # ~20°
+
+                # 3. Tilt: plug's local -Z axis must point close to world -Z (vertical).
+                plug_z_local = torch.zeros((self.num_envs, 3), device=self.device)
+                plug_z_local[:, 2] = -1.0
+                plug_z_world = torch_utils.quat_rotate(self.held_quat, plug_z_local)
+                cos_tilt = -plug_z_world[:, 2]
+                is_tilt = cos_tilt > 0.966  # deviation < ~15°
+
+                # 4. Z (loose): tip must be within 40 mm above the socket opening.
+                _Z_APPROACH = 0.040
+                is_z = z_disp < _Z_APPROACH
+
+                curr_successes = is_xy & is_yaw & is_tilt & is_z
+            else:
+                # ── SUCCESS check (sustained) ──────────────────────────────────────
+                # Fire when the connector tip has entered the socket AND XY is aligned.
+                # Naturally sustained: once inside (z_disp < 0) stays True as long as
+                # the plug remains inside the socket cavity.
+                #
+                # height_threshold = fixed_cfg.height * success_threshold.
+                # success_threshold can be negative to require the tip to be a certain
+                # depth INSIDE the socket (z_disp < 0 means tip is past the opening).
+                # Example: success_threshold = -0.24 →
+                #   height_threshold = 0.02922 × (-0.24) ≈ -0.007 m
+                #   is_inside fires when z_disp < -7 mm, i.e., tip ≥ 7 mm inside socket
+                #   (~half the 13.98 mm connector head length).
+                _XY_STRICT = 0.003  # 3 mm — tighter than engage XY tolerance
+                height_threshold = fixed_cfg.height * success_threshold
+                is_inside = z_disp < height_threshold
+                is_xy_strict = xy_dist < _XY_STRICT
+                curr_successes = is_inside & is_xy_strict
         else:
             raise NotImplementedError("Task not implemented")
         
@@ -592,6 +669,25 @@ class FactoryEnv(DirectRLEnv):
                 _, keypoints_fixed[:, i] = torch_utils.tf_combine(
                     self.fixed_quat, self.fixed_pos, ident, self.kp_box_local[:, i]
                 )
+        elif self.cfg_task.name == "rj45_insert":
+            # [CUSTOM] Per-episode random body keypoints for rj45_insert.
+            # At full insertion the male plug USD origin coincides with the female socket
+            # USD origin (same XY/Z world position, same orientation).  Using the SAME
+            # random local-frame offset in both frames therefore gives:
+            #   keypoint_dist → 0  iff  held_pos == fixed_pos  AND  held_quat == fixed_quat
+            # This provides a dense gradient signal from the initial approach all the way
+            # to the fully-inserted mated state (unlike a fixed tip-face target that
+            # saturates as soon as the tip reaches the socket opening).
+            n_kp = self.kp_rj45_local.shape[1]
+            keypoints_held  = torch.zeros((self.num_envs, n_kp, 3), device=self.device)
+            keypoints_fixed = torch.zeros((self.num_envs, n_kp, 3), device=self.device)
+            for i in range(n_kp):
+                _, keypoints_held[:, i]  = torch_utils.tf_combine(
+                    self.held_quat,  self.held_pos,  ident, self.kp_rj45_local[:, i]
+                )
+                _, keypoints_fixed[:, i] = torch_utils.tf_combine(
+                    self.fixed_quat, self.fixed_pos, ident, self.kp_rj45_local[:, i]
+                )
         else:
             held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
                 self.held_pos, self.held_quat, self.cfg_task.name, self.cfg_task.fixed_asset_cfg, self.num_envs, self.device
@@ -658,6 +754,20 @@ class FactoryEnv(DirectRLEnv):
         self.step_sim_no_action()
 
         self.randomize_initial_state(env_ids)
+
+        # [CUSTOM] Keypoints for rj45_insert.
+        # At full insertion male plug origin = female socket origin, so the same random
+        # local-frame offset maps to the same world position → keypoint_dist → 0.
+        # Sample 5 random points within the connector-body bounding volume (metres):
+        #   X ∈ [-0.030,  0.010]  (40 mm wide, centred on connector cross-section)
+        #   Y ∈ [-0.005,  0.028]  (33 mm deep)
+        #   Z ∈ [-0.014,  0.000]  (connector head, tip at -13.98 mm up to origin)
+        if self.cfg_task.name == "rj45_insert":
+            n_kp = self.kp_rj45_local.shape[1]
+            r = torch.rand((len(env_ids), n_kp, 3), device=self.device)
+            self.kp_rj45_local[env_ids, :, 0] = r[:, :, 0] * 0.040 - 0.030
+            self.kp_rj45_local[env_ids, :, 1] = r[:, :, 1] * 0.033 - 0.005
+            self.kp_rj45_local[env_ids, :, 2] = r[:, :, 2] * 0.014 - 0.014
 
         # [CUSTOM] Keypoints for box_lid_insert.
         # At success pose lid origin = box origin, so kp_box_local == kp_lid_local.
@@ -783,6 +893,17 @@ class FactoryEnv(DirectRLEnv):
             #   This is a per-task empirical offset tuned to keep the handle
             #   centred between the pads after the gripper closes.
             #   Default = [0, 0.02, 0.005]: 20 mm inward along Y, 5 mm along Z.
+            pos_offset = torch.tensor(self.cfg_task.held_asset_pos_offset, device=self.device)
+            held_asset_relative_pos += pos_offset.unsqueeze(0)
+        elif self.cfg_task.name == "rj45_insert":
+            # [CUSTOM] RJ45 male plug: grip near the cable end (sim_Z ≈ height = 0.077 m).
+            # Franka finger pad centre is franka_fingerpad_length = 0.0176 m below fingertip.
+            # For the Kuka embedded-link variant this value is computed but not used
+            # (there is no separate _held_asset; the body position comes from the robot).
+            held_asset_relative_pos = torch.zeros((self.num_envs, 3), device=self.device)
+            held_asset_relative_pos[:, 2] = (
+                self.cfg_task.held_asset_cfg.height - self.cfg_task.robot_cfg.franka_fingerpad_length
+            )
             pos_offset = torch.tensor(self.cfg_task.held_asset_pos_offset, device=self.device)
             held_asset_relative_pos += pos_offset.unsqueeze(0)
         else:
