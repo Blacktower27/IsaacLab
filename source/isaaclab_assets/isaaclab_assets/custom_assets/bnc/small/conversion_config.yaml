@@ -1,0 +1,37 @@
+# Per-asset conversion config for Isaac Lab MeshConverter.
+# Used by: custom_assets/convert_stl_to_usd.py
+#
+# scale: STL source files are in mm → 0.001 converts to meters
+#
+# BNC Small connector geometry (STL, mm, Z-up — no rotation needed):
+#
+#   Female (socket, fixed/kinematic):
+#     X ∈ [-22.0, +22.0]  Y ∈ [-22.0, +22.0]  Z ∈ [-35.0, +25.0]
+#     Origin: 35mm above socket base, 25mm below socket opening (Z=+25mm).
+#     init_state.pos.z = 0.035m so base sits flush with the table.
+#
+#   Male (plug, held/dynamic):
+#     X ∈ [-20.7, +20.7]  Y ∈ [-18.3, +18.3]  Z ∈ [+36.235, +107.201]
+#     Origin is 36.235mm BELOW the tip (plug tip at Z=+36.235mm above origin).
+#     Cable/grip end at Z=+107.201mm above origin.
+#
+# Collision notes:
+#   Female: kinematic body → sdf gives exact cavity geometry.
+#   Male:   dynamic body  → sdf works for dynamic in Isaac Sim 4.x.
+
+default:
+  scale: 0.001
+  make_instanceable: false
+  collision_approximation: sdf
+  contact_offset: 0.001
+  rest_offset: 0.0
+  rotation: null
+
+assets:
+  Adi_BNC_Simulation_Small_Female.stl:
+    mass: 0.05
+    collision_approximation: sdf
+
+  Adi_BNC_Simulation_Small_Male.stl:
+    mass: 0.01
+    collision_approximation: sdf

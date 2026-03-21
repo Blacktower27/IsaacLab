@@ -105,6 +105,12 @@ def get_held_base_pos_local(task_name, fixed_asset_cfg, num_envs, device):
         # Shifting by -0.01398 transforms the tracked reference from the USD root
         # to the physical connector tip — the face that must reach the socket opening.
         held_base_z_offset = -0.01398  # = RJ45MaleCfg.base_height (negative → tip below origin)
+    elif task_name == "bnc_insert":
+        # [CUSTOM] BNC Small male plug: the connector tip (insertion end) sits ABOVE
+        # the USD prim origin.  The STL has Z in [+36.235, +107.201] mm, so the origin
+        # is 36.235 mm BELOW the tip.  Shifting by +0.036235 transforms the tracked
+        # reference from the USD root to the physical connector tip.
+        held_base_z_offset = 0.036235  # = BNCSmallMaleCfg.base_height (positive → tip above origin)
     else:
         raise NotImplementedError("Task not implemented")
 
@@ -173,6 +179,17 @@ def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg,
         # This value is kept for visualisation (visualize_rj45_success_kuka.py) and
         # any code that calls get_target_held_base_pose outside of keypoint computation.
         fixed_success_pos_local[:, 2] = fixed_asset_cfg.height  # = 0.02922 m (socket opening)
+    elif task_name == "bnc_insert":
+        # [CUSTOM] BNC Small insertion geometry (values in metres, scale ×0.001):
+        #
+        # Female socket (fixed): USD origin is 35 mm above the socket base.
+        #   Socket opening is at female-local sim_Z = +25 mm = 0.025 m.
+        #
+        # Male plug (held): connector TIP is at male-local sim_Z = +36.235 mm (tracked
+        #   as held_base via the +0.036235 offset in get_held_base_pos_local).
+        #
+        # Target: the connector tip should reach the socket opening level.
+        fixed_success_pos_local[:, 2] = fixed_asset_cfg.height  # = 0.025 m (socket opening)
     else:
         raise NotImplementedError("Task not implemented")
     fixed_success_quat_local = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).repeat(num_envs, 1)

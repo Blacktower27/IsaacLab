@@ -39,6 +39,13 @@ _RJ45_DIR = _os.path.normpath(
     )
 )
 
+_BNC_SMALL_DIR = _os.path.normpath(
+    _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        "../../../../isaaclab_assets/isaaclab_assets/custom_assets/bnc/small",
+    )
+)
+
 
 @configclass
 class ForgeTask(FactoryTask):
@@ -459,6 +466,174 @@ class ForgeRJ45Insert(ForgeTask):
             # pos.z = base_height (0.02223 m) places the socket base flush with the
             # table surface.  The USD origin is 22.23 mm above the socket base.
             pos=(0.6, 0.0, 0.02223),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+    )
+    held_asset: ArticulationCfg = ArticulationCfg(
+        prim_path="/World/envs/env_.*/HeldAsset",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=held_asset_cfg.usd_path,
+            activate_contact_sensors=True,
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                fix_root_link=False,
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                max_depenetration_velocity=5.0,
+                linear_damping=0.0,
+                angular_damping=0.0,
+                max_linear_velocity=1000.0,
+                max_angular_velocity=3666.0,
+                enable_gyroscopic_forces=True,
+                solver_position_iteration_count=192,
+                solver_velocity_iteration_count=1,
+                max_contact_impulse=1e32,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=held_asset_cfg.mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.001, rest_offset=0.0),
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0.0, 0.4, 0.1), rot=(1.0, 0.0, 0.0, 0.0), joint_pos={}, joint_vel={}
+        ),
+        actuators={},
+    )
+
+
+# ---------------------------------------------------------------------------
+# [CUSTOM] BNC Small insertion task — asset configurations
+# ---------------------------------------------------------------------------
+
+@configclass
+class BNCSmallFemaleCfg(FixedAssetCfg):
+    """Adi_BNC_Simulation_Small_Female.usd — fixed socket, receives the male plug.
+
+    STL coordinate system (mm, converted to metres with scale 0.001, Z-up, no rotation):
+        X in [-22.0, +22.0]  ->  44 mm wide  (symmetric)
+        Y in [-22.0, +22.0]  ->  44 mm deep  (symmetric)
+        Z in [-35.0, +25.0]  ->  60 mm tall
+
+    USD origin is 35 mm above the socket base and 25 mm below the socket opening.
+    init_state.pos.z = 0.035 m so the socket base is flush with the table surface.
+    """
+
+    usd_path: str = f"{_BNC_SMALL_DIR}/Adi_BNC_Simulation_Small_Female.usd"
+    # height = distance from USD origin to socket opening (where plug enters) = 25 mm.
+    height: float = 0.025
+    # base_height handled via init_state.pos.z = 0.035 m.
+    base_height: float = 0.0
+    mass: float = 0.05
+    friction: float = 0.75
+
+
+@configclass
+class BNCSmallMaleCfg(HeldAssetCfg):
+    """Adi_BNC_Simulation_Small_Male.usd — held by robot, inserted into socket.
+
+    STL coordinate system (mm, converted to metres with scale 0.001, Z-up, no rotation):
+        X in [-20.7, +20.7]  ->  41.4 mm wide  (symmetric)
+        Y in [-18.3, +18.3]  ->  36.6 mm deep  (symmetric)
+        Z in [+36.235, +107.201]  ->  70.966 mm tall
+
+    USD origin is 36.235 mm BELOW the connector tip (part is entirely above origin).
+    Connector tip (insertion end): sim_Z = +36.235 mm  (ABOVE origin -> positive base_height).
+    Body centre / grip point:      sim_Z = +71.7 mm.
+    """
+
+    usd_path: str = f"{_BNC_SMALL_DIR}/Adi_BNC_Simulation_Small_Male.usd"
+    # diameter = BNC barrel outer diameter (~20 mm), for gripper finger separation.
+    diameter: float = 0.020
+    # height = sim_Z of the grip point (body centre at 36.235 + 35.5 = 71.7 mm).
+    height: float = 0.0717
+    # base_height = sim_Z of connector tip from USD origin (+36.235 mm).
+    # Positive because the tip is ABOVE the origin.
+    base_height: float = 0.036235
+    mass: float = 0.01
+    friction: float = 0.75
+
+
+@configclass
+class ForgeBNCSmallInsert(ForgeTask):
+    """FORGE BNC Small plug-into-socket insertion task.
+
+    The robot holds the BNC male plug and inserts it downward into the
+    BNC female socket fixed on the table.
+
+    Coordinate conventions:
+        - All positions in metres.
+        - hand_init_pos is relative to the fixed-asset tip (socket opening).
+        - The female socket opens upward (+Z); insertion direction is -Z.
+    """
+
+    name: str = "bnc_insert"
+    fixed_asset_cfg: BNCSmallFemaleCfg = BNCSmallFemaleCfg()
+    held_asset_cfg: BNCSmallMaleCfg = BNCSmallMaleCfg()
+    asset_size: float = 44.0
+    duration_s: float = 10.0
+
+    # --- Robot initial state (relative to socket opening) ---
+    hand_init_pos: list = [0.00, 0.00, 0.05]
+    hand_init_pos_noise: list = [0.0, 0.0, 0.0]
+    hand_init_orn: list = [3.1416, 0.0, 0.0]
+    hand_init_orn_noise: list = [0.0, 0.0, 0.0]
+
+    # --- Random initial pose ---
+    hand_init_x_range: list = [-0.03, 0.03]
+    hand_init_y_range: list = [-0.03, 0.03]
+    hand_init_z_range: list = [0.04, 0.08]
+    hand_init_yaw_noise_deg: float = 0.0
+    hand_init_pitch_noise_deg: float = 0.0
+
+    # --- Fixed asset (socket) randomisation ---
+    fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
+    fixed_asset_init_orn_deg: float = 0.0
+    # BNC is cylindrically symmetric -> full 360 deg yaw randomisation.
+    fixed_asset_init_orn_range_deg: float = 360.0
+
+    # --- Held asset (plug) in-gripper noise ---
+    held_asset_pos_noise: list = [0.002, 0.002, 0.002]
+    held_asset_rot_init: float = 0.0
+    held_asset_pos_offset: list = [0.0, 0.0, 0.0]
+
+    # --- Reward shaping ---
+    contact_penalty_scale: float = 0.0
+    # Standard axis keypoints (4 points along Z, +/-15 mm spread).
+    num_keypoints: int = 4
+    keypoint_scale: float = 0.03
+    keypoint_coef_baseline: list = [5, 4]
+    keypoint_coef_coarse: list = [50, 2]
+    keypoint_coef_fine: list = [100, 0]
+    # engage_threshold > 1.0 -> XY + yaw + tilt alignment check (same as rj45_insert).
+    engage_threshold: float = 2.0
+    # success_threshold < 0 -> tip must be 7.5 mm inside socket (0.025 x 0.3 = 7.5 mm).
+    success_threshold: float = -0.3
+
+    # --- Scene assets (BNC Female socket is kinematic RigidObject) ---
+    fixed_asset: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/FixedAsset",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=fixed_asset_cfg.usd_path,
+            activate_contact_sensors=True,
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(articulation_enabled=False),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                max_depenetration_velocity=5.0,
+                linear_damping=0.0,
+                angular_damping=0.0,
+                max_linear_velocity=1000.0,
+                max_angular_velocity=3666.0,
+                enable_gyroscopic_forces=True,
+                solver_position_iteration_count=192,
+                solver_velocity_iteration_count=1,
+                max_contact_impulse=1e32,
+                kinematic_enabled=True,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=fixed_asset_cfg.mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.001, rest_offset=0.0),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            # pos.z = 0.035 m: socket base (STL Z=-35 mm) flush with table surface.
+            pos=(0.6, 0.0, 0.035),
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
