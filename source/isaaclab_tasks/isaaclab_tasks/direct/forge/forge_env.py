@@ -163,7 +163,9 @@ class ForgeEnv(FactoryEnv):
         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
         ctrl_target_fingertip_preclipped_pos = fixed_pos_action_frame + pos_actions
         # (1.b) Enforce rotation action constraints.
-        rot_actions[:, 0] = 0.0
+        rot_actions[:, 0] = 0.0  # roll always zero
+        if self.cfg_task.name in ("rj45_insert", "bnc_insert"):
+            rot_actions[:, 1] = 0.0  # pitch zero: plug insertion is pure axial + yaw
 
         # Assumes joint limit is in (+x, -y)-quadrant of world frame.
         rot_actions[:, 2] = np.deg2rad(-180.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0  # Joint limit.

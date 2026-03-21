@@ -741,7 +741,7 @@ class FactoryEnv(DirectRLEnv):
             # (target_held_base) and orientations match.  Applying the SAME random
             # local-frame offsets from both base poses gives keypoint_dist → 0 at success.
             # XY spread (±11mm) encodes yaw alignment; Z spread (−60mm…0) encodes depth.
-            held_base_pos_kp, held_base_q.google.comuat_kp = factory_utils.get_held_base_pose(
+            held_base_pos_kp, held_base_quat_kp = factory_utils.get_held_base_pose(
                 self.held_pos, self.held_quat, self.cfg_task.name,
                 self.cfg_task.fixed_asset_cfg, self.num_envs, self.device,
             )

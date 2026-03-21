@@ -39,10 +39,9 @@ parser.add_argument(
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument(
     "--record_csv",
-    type=str,
-    default=None,
-    metavar="PATH",
-    help="If set, record EE pose, joint states, and box pose (all in robot base frame) to this CSV file.",
+    action="store_true",
+    default=False,
+    help="If set, record EE (link_ee) pose, joint states, and box pose to a CSV file named after the task.",
 )
 parser.add_argument(
     "--record_env_idx",
@@ -207,8 +206,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     csv_file = None
     csv_writer = None
     episode_start_time = None  # tracks sim_time at the start of each episode
+    # Find link_ee body index once (used for EE pose recording).
+    _link_ee_idx = None
     if args_cli.record_csv:
-        csv_path = os.path.abspath(args_cli.record_csv)
+        _robot = env.unwrapped._robot
+        if "link_ee" in _robot.body_names:
+            _link_ee_idx = _robot.body_names.index("link_ee")
+        else:
+            print("[WARN] link_ee not found in robot body_names; falling back to fingertip_midpoint.")
+    if args_cli.record_csv:
+        import datetime
+        task_short = args_cli.task.split(":")[-1] if args_cli.task else "task"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_path = os.path.abspath(os.path.join("logs", "trajectories", f"{task_short}_{timestamp}.csv"))
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         csv_file = open(csv_path, "w", newline="")
         csv_writer = csv.writer(csv_file)
@@ -217,6 +227,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "ee_x", "ee_y", "ee_z", "ee_roll", "ee_pitch", "ee_yaw",
             "A1", "A2", "A3", "A4", "A5", "A6", "A7",
             "box_x", "box_y", "box_z", "box_roll", "box_pitch", "box_yaw",
+            "episode_success",
         ])
         print(f"[INFO] Recording trajectory to: {csv_path}  (env_idx={args_cli.record_env_idx})")
 
@@ -262,9 +273,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 robot_base_pos_w = robot.data.root_pos_w[i]   # [3]
                 robot_base_quat_w = robot.data.root_quat_w[i]  # [4] wxyz
 
-                # EE: fingertip_midpoint_pos is already (pos_world - env_origin)
-                ee_pos_env = base_env.fingertip_midpoint_pos[i]
-                ee_quat_w = base_env.fingertip_midpoint_quat[i]
+                # EE: use link_ee (robot flange) body pose in world frame.
+                if _link_ee_idx is not None:
+                    ee_pos_w = robot.data.body_pos_w[i, _link_ee_idx]
+                    ee_quat_w = robot.data.body_quat_w[i, _link_ee_idx]
+                    ee_pos_env = ee_pos_w - scene.env_origins[i]
+                else:
+                    ee_pos_env = base_env.fingertip_midpoint_pos[i]
+                    ee_quat_w = base_env.fingertip_midpoint_quat[i]
 
                 # Robot base position in same env-local frame
                 robot_base_pos_env = robot_base_pos_w - scene.env_origins[i]
@@ -302,6 +318,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
                 ee_xyz = ee_pos_base.cpu().numpy()
                 box_xyz = box_pos_base.cpu().numpy()
+                ep_succ = int(ever_succeeded[i].item()) if ever_succeeded is not None else 0
                 csv_writer.writerow([
                     f"{episode_time:.6f}",
                     f"{ee_xyz[0]:.6f}", f"{ee_xyz[1]:.6f}", f"{ee_xyz[2]:.6f}",
@@ -309,6 +326,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     *[f"{v:.6f}" for v in joint_pos_np],
                     f"{box_xyz[0]:.6f}", f"{box_xyz[1]:.6f}", f"{box_xyz[2]:.6f}",
                     f"{float(box_r[0]):.6f}", f"{float(box_p[0]):.6f}", f"{float(box_yaw[0]):.6f}",
+                    ep_succ,
                 ])
             if actions.shape[-1] > 6:
                 success_pred = (actions[:, 6] + 1) / 2
@@ -363,7 +381,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # close CSV file if recording
     if csv_file is not None:
         csv_file.close()
-        print(f"[INFO] Trajectory saved to: {os.path.abspath(args_cli.record_csv)}")
+        print(f"[INFO] Trajectory saved to: {csv_path}")
 
     # close the simulator
     env.close()
