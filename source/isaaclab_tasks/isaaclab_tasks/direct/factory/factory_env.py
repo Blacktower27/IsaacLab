@@ -741,7 +741,7 @@ class FactoryEnv(DirectRLEnv):
             # (target_held_base) and orientations match.  Applying the SAME random
             # local-frame offsets from both base poses gives keypoint_dist → 0 at success.
             # XY spread (±11mm) encodes yaw alignment; Z spread (−60mm…0) encodes depth.
-            held_base_pos_kp, held_base_quat_kp = factory_utils.get_held_base_pose(
+            held_base_pos_kp, held_base_q.google.comuat_kp = factory_utils.get_held_base_pose(
                 self.held_pos, self.held_quat, self.cfg_task.name,
                 self.cfg_task.fixed_asset_cfg, self.num_envs, self.device,
             )
@@ -1112,6 +1112,17 @@ class FactoryEnv(DirectRLEnv):
         self.fixed_pos_obs_frame[:] = fixed_tip_pos
 
         # (2) Move gripper to randomizes location above fixed asset. Keep trying until IK succeeds.
+        # --- Per-env near/far init mode (computed once; stable across IK retry iterations) ---
+        _init_mode = getattr(self.cfg_task, "init_mode", "far")
+        _near_prob  = getattr(self.cfg_task, "near_init_prob", 0.5)
+        _is_near = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if _init_mode == "near":
+            _is_near[env_ids] = True
+        elif _init_mode == "mixed":
+            _near_mask = torch.rand(len(env_ids), device=self.device) < _near_prob
+            _is_near[env_ids[_near_mask]] = True
+        # "far": _is_near stays all False
+
         # (a) get position vector to target
         bad_envs = env_ids.clone()
         ik_attempt = 0
@@ -1131,20 +1142,22 @@ class FactoryEnv(DirectRLEnv):
 
             # For box_lid_insert: apply XY and Z in box-local frame (box-yaw aligned).
             if self.cfg_task.name == "box_lid_insert":
-                # [OLD: fixed XY offset from hand_init_pos cfg]
-                xy_local = torch.tensor(
-                    [self.cfg_task.hand_init_pos[0], self.cfg_task.hand_init_pos[1], 0.0],
-                    device=self.device,
-                ).unsqueeze(0).repeat(self.num_envs, 1)
-
-                # [NEW: random XYZ from cfg ranges (box-local frame)]
-                # x_lo, x_hi = self.cfg_task.hand_init_x_range
-                # y_lo, y_hi = self.cfg_task.hand_init_y_range
-                # z_lo, z_hi = self.cfg_task.hand_init_z_range
-                # r = torch.rand((self.num_envs, 3), device=self.device)
-                # xy_local = torch.zeros((self.num_envs, 3), device=self.device)
-                # xy_local[:, 0] = r[:, 0] * (x_hi - x_lo) + x_lo
-                # xy_local[:, 1] = r[:, 1] * (y_hi - y_lo) + y_lo
+                xy_local = torch.zeros((self.num_envs, 3), device=self.device)
+                # Near mode: fixed XY offset from hand_init_pos (directly above box).
+                xy_local[_is_near, 0] = self.cfg_task.hand_init_pos[0]
+                xy_local[_is_near, 1] = self.cfg_task.hand_init_pos[1]
+                # Far mode: random XYZ from cfg ranges (box-local frame).
+                _is_far = ~_is_near
+                if _is_far.any():
+                    x_lo, x_hi = self.cfg_task.hand_init_x_range
+                    y_lo, y_hi = self.cfg_task.hand_init_y_range
+                    z_lo, z_hi = self.cfg_task.hand_init_z_range
+                    r = torch.rand((self.num_envs, 3), device=self.device)
+                    xy_local[_is_far, 0] = r[_is_far, 0] * (x_hi - x_lo) + x_lo
+                    xy_local[_is_far, 1] = r[_is_far, 1] * (y_hi - y_lo) + y_lo
+                    above_fixed_pos[_is_far, 2] = (
+                        fixed_tip_pos[_is_far, 2] + r[_is_far, 2] * (z_hi - z_lo) + z_lo
+                    )
                 identity = torch.tensor(
                     [1.0, 0.0, 0.0, 0.0], device=self.device
                 ).unsqueeze(0).repeat(self.num_envs, 1)
@@ -1155,10 +1168,36 @@ class FactoryEnv(DirectRLEnv):
                     xy_local,
                 )
                 above_fixed_pos += xy_world
-                # Z: sampled uniformly in [z_lo, z_hi] above box top.
-                # above_fixed_pos[:, 2] = (
-                #     fixed_tip_pos[:, 2] + r[:, 2] * (z_hi - z_lo) + z_lo
-                # )
+
+            # Far-mode position override for rj45_insert and bnc_insert.
+            # Near mode keeps the default fixed hand_init_pos directly above the socket.
+            # Far mode: XY sampled in socket-local frame and rotated to world; Z above socket opening.
+            if self.cfg_task.name in ("rj45_insert", "bnc_insert"):
+                far_mask = ~_is_near[bad_envs]
+                if far_mask.any():
+                    far_env_ids = bad_envs[far_mask]
+                    n_far = int(far_mask.sum())
+                    x_lo, x_hi = self.cfg_task.hand_init_x_range
+                    y_lo, y_hi = self.cfg_task.hand_init_y_range
+                    z_lo, z_hi = self.cfg_task.hand_init_z_range
+                    r = torch.rand((n_far, 3), device=self.device)
+                    xy_local_far = torch.zeros((n_far, 3), device=self.device)
+                    xy_local_far[:, 0] = r[:, 0] * (x_hi - x_lo) + x_lo
+                    xy_local_far[:, 1] = r[:, 1] * (y_hi - y_lo) + y_lo
+                    ident_n = torch.tensor(
+                        [1.0, 0.0, 0.0, 0.0], device=self.device
+                    ).unsqueeze(0).expand(n_far, -1)
+                    _, xy_world_far = torch_utils.tf_combine(
+                        self.fixed_quat[far_env_ids],
+                        torch.zeros((n_far, 3), device=self.device),
+                        ident_n, xy_local_far,
+                    )
+                    above_fixed_pos[far_env_ids, :2] = (
+                        fixed_tip_pos[far_env_ids, :2] + xy_world_far[:, :2]
+                    )
+                    above_fixed_pos[far_env_ids, 2] = (
+                        fixed_tip_pos[far_env_ids, 2] + r[:, 2] * (z_hi - z_lo) + z_lo
+                    )
 
             # (b) get random orientation facing down
             hand_down_euler = (
@@ -1176,7 +1215,6 @@ class FactoryEnv(DirectRLEnv):
             if self.cfg_task.name == "box_lid_insert":
                 _, _, box_yaw = torch_utils.get_euler_xyz(self.fixed_quat[bad_envs])
                 hand_down_euler[:, 2] = box_yaw - 0.5 * torch.pi
-                # [NEW: ±yaw and ±pitch noise]
                 yaw_noise = (torch.rand(n_bad, device=self.device) * 2 - 1) * np.deg2rad(
                     self.cfg_task.hand_init_yaw_noise_deg
                 )
@@ -1185,6 +1223,24 @@ class FactoryEnv(DirectRLEnv):
                 )
                 hand_down_euler[:, 2] += yaw_noise
                 hand_down_euler[:, 1] += pitch_noise
+
+            # Far-mode yaw alignment for rj45_insert and bnc_insert (no pitch noise).
+            # Near mode keeps hand_init_orn yaw as-is (fixed directly above socket).
+            # Far mode aligns plug yaw to socket yaw ± noise; BNC picks 0° or 180° base.
+            if self.cfg_task.name in ("rj45_insert", "bnc_insert"):
+                far_mask = ~_is_near[bad_envs]
+                if far_mask.any():
+                    n_far = int(far_mask.sum())
+                    yaw_deg = getattr(self.cfg_task, "hand_init_yaw_noise_deg", 0.0)
+                    _, _, sock_yaw = torch_utils.get_euler_xyz(self.fixed_quat[bad_envs[far_mask]])
+                    yaw_noise = (torch.rand(n_far, device=self.device) * 2 - 1) * np.deg2rad(yaw_deg)
+                    base_yaw = sock_yaw.clone()
+                    if self.cfg_task.name == "bnc_insert":
+                        # Two valid bayonet orientations: 0° or 180° relative to socket yaw.
+                        flip = torch.randint(0, 2, (n_far,), device=self.device).float() * torch.pi
+                        base_yaw = base_yaw + flip
+                    hand_down_euler[far_mask, 2] = base_yaw + yaw_noise
+                    # pitch stays at hand_init_orn[1] — EE straight down, no pitch noise
 
             hand_down_quat[bad_envs, :] = torch_utils.quat_from_euler_xyz(
                 roll=hand_down_euler[:, 0], pitch=hand_down_euler[:, 1], yaw=hand_down_euler[:, 2]
