@@ -191,8 +191,15 @@ class ForgeBoxLidInsert(ForgeTask):
     hand_init_z_range: list = [0.055, 0.085]  # Z above box top (m)
     # hand_init_yaw_noise_deg: float = 20.0     # ±yaw noise (deg) on top of box-aligned yaw
     # hand_init_pitch_noise_deg: float = 20.0   # ±pitch noise (deg)
-    hand_init_yaw_noise_deg: float = 0.0     # ±yaw noise (deg) on top of box-aligned yaw
-    hand_init_pitch_noise_deg: float = 0.0   # ±pitch noise (deg)
+    hand_init_yaw_noise_deg: float = 20.0   # ±yaw noise (deg) on top of box-aligned yaw
+    hand_init_pitch_noise_deg: float = 0.0  # ±pitch noise (deg)
+
+    # --- Init mode ---
+    # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
+    # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
+    # "mixed" : near_init_prob fraction of envs start near, the rest far.
+    init_mode: str = "near"
+    near_init_prob: float = 0.5
 
     # --- Fixed asset (box) randomisation ---
     # fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]  # Z=0.05 allows vertical jitter
@@ -406,11 +413,20 @@ class ForgeRJ45Insert(ForgeTask):
     hand_init_orn_noise: list = [0.0, 0.0, 0.0]
 
     # --- Random initial pose ---
-    hand_init_x_range: list = [-0.03, 0.03]
-    hand_init_y_range: list = [-0.03, 0.03]
-    hand_init_z_range: list = [0.04, 0.08]
-    hand_init_yaw_noise_deg: float = 0.0
-    hand_init_pitch_noise_deg: float = 0.0
+    # Near mode: XY in socket-local frame, Z above socket opening (metres).
+    # yaw is aligned to socket yaw ± hand_init_yaw_noise_deg; no pitch noise.
+    hand_init_x_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
+    hand_init_y_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
+    hand_init_z_range: list = [0.015, 0.12]   # 15~120 mm above socket opening
+    hand_init_yaw_noise_deg: float = 30.0      # ±30° from socket yaw (no pitch)
+    hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
+
+    # --- Init mode ---
+    # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
+    # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
+    # "mixed" : near_init_prob fraction of envs start near, the rest far.
+    init_mode: str = "near"
+    near_init_prob: float = 0.5
 
     # --- Fixed asset (socket) randomisation ---
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
@@ -578,11 +594,20 @@ class ForgeBNCSmallInsert(ForgeTask):
     hand_init_orn_noise: list = [0.0, 0.0, 0.0]
 
     # --- Random initial pose ---
-    hand_init_x_range: list = [-0.03, 0.03]
-    hand_init_y_range: list = [-0.03, 0.03]
-    hand_init_z_range: list = [0.04, 0.08]
-    hand_init_yaw_noise_deg: float = 0.0
-    hand_init_pitch_noise_deg: float = 0.0
+    # Near mode: XY in socket-local frame, Z above socket opening (metres).
+    # yaw is aligned to socket yaw (or +180°) ± hand_init_yaw_noise_deg; no pitch noise.
+    hand_init_x_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
+    hand_init_y_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
+    hand_init_z_range: list = [0.015, 0.12]   # 15~120 mm above socket opening
+    hand_init_yaw_noise_deg: float = 30.0      # ±30° from socket yaw (0° or 180° base)
+    hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
+
+    # --- Init mode ---
+    # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
+    # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
+    # "mixed" : near_init_prob fraction of envs start near, the rest far.
+    init_mode: str = "near"
+    near_init_prob: float = 0.5
 
     # --- Fixed asset (socket) randomisation ---
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
