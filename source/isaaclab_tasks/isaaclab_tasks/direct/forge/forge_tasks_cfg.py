@@ -454,6 +454,15 @@ class ForgeRJ45Insert(ForgeTask):
     #   (z_disp < -0.007 m) AND XY is within 3 mm.
     #   The male connector head is ~14 mm long, so -0.24 requires roughly half-insertion.
     success_threshold: float = -0.24
+    # Two-phase keypoint strategy (mirrors box_lid_insert):
+    #   Phase 1 (before first success): num_reset_kp Z-axis keypoints (X=Y=0).
+    #     Pure Z spread gives a clear gradient for XY alignment and approach,
+    #     avoiding the "push straight down" bias of random body keypoints.
+    #   Phase 2 (after first success): num_success_kp random body keypoints (full XYZ).
+    #     Denser coverage for sustained deep insertion guidance.
+    # Buffer size = max(num_reset_kp, num_success_kp).
+    num_reset_kp: int = 4    # Z-axis keypoints during approach (phase 1)
+    num_success_kp: int = 10  # random body keypoints after first success (phase 2)
 
     # --- Scene assets (RJ45 Female socket is kinematic RigidObject) ---
     fixed_asset: RigidObjectCfg = RigidObjectCfg(
@@ -622,9 +631,6 @@ class ForgeBNCSmallInsert(ForgeTask):
 
     # --- Reward shaping ---
     contact_penalty_scale: float = 0.0
-    # Standard axis keypoints (4 points along Z, +/-15 mm spread).
-    num_keypoints: int = 4
-    keypoint_scale: float = 0.03
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
@@ -632,6 +638,11 @@ class ForgeBNCSmallInsert(ForgeTask):
     engage_threshold: float = 2.0
     # success_threshold < 0 -> tip must be 7.5 mm inside socket (0.025 x 0.3 = 7.5 mm).
     success_threshold: float = -0.3
+    # Two-phase keypoints (same strategy as rj45_insert):
+    #   Phase 1: Z-axis keypoints in tip frame (X=Y=0, Z ∈ [-60mm, 0]).
+    #   Phase 2: random body keypoints (XY ∈ ±11mm, Z ∈ [-60mm, 0]).
+    num_reset_kp: int = 4
+    num_success_kp: int = 10
 
     # --- Scene assets (BNC Female socket is kinematic RigidObject) ---
     fixed_asset: RigidObjectCfg = RigidObjectCfg(

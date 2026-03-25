@@ -103,19 +103,22 @@ class FactoryEnv(DirectRLEnv):
             self.kp_lid_local = torch.zeros((self.num_envs, n, 3), device=self.device)
             self.kp_box_local = torch.zeros((self.num_envs, n, 3), device=self.device)
 
-        # [CUSTOM] Per-episode keypoints for rj45_insert (sampled once per reset).
-        # At full insertion the male plug USD origin coincides with the female socket USD origin,
-        # so using the SAME local-frame offsets for both objects gives keypoint_dist → 0 at success.
+        # [CUSTOM] Per-episode keypoints for rj45_insert — two-phase strategy.
+        # Phase 1 (before first success): num_reset_kp Z-axis-only keypoints (X=Y=0).
+        #   Applied identically to plug (held_pos frame) and socket (fixed_pos frame);
+        #   keypoint_dist -> 0 when origins coincide AND axes align.
+        # Phase 2 (after first success): num_success_kp random body keypoints (full XYZ).
+        # Buffer size = max(num_reset_kp, num_success_kp).
         if self.cfg_task.name == "rj45_insert":
-            _N_RJ45_KP = 5
+            _N_RJ45_KP = max(self.cfg_task.num_reset_kp, self.cfg_task.num_success_kp)
             self.kp_rj45_local = torch.zeros((self.num_envs, _N_RJ45_KP, 3), device=self.device)
 
-        # [CUSTOM] Per-episode keypoints for bnc_insert (sampled once per reset).
-        # At full insertion the male tip (held_base) coincides with the socket opening (target_held_base).
-        # Using the SAME local-frame offsets from both base poses gives keypoint_dist → 0 at success.
-        # Random XY spread encodes yaw alignment; Z spread encodes insertion depth.
+        # [CUSTOM] Per-episode keypoints for bnc_insert — two-phase strategy.
+        # Phase 1: num_reset_kp Z-axis keypoints in the tip/opening frame (X=Y=0, Z in [-60mm, 0]).
+        # Phase 2: num_success_kp random body keypoints (XY in +-11mm, Z in [-60mm, 0]).
+        # Buffer size = max(num_reset_kp, num_success_kp).
         if self.cfg_task.name == "bnc_insert":
-            _N_BNC_KP = 5
+            _N_BNC_KP = max(self.cfg_task.num_reset_kp, self.cfg_task.num_success_kp)
             self.kp_bnc_local = torch.zeros((self.num_envs, _N_BNC_KP, 3), device=self.device)
 
     def _setup_scene(self):
@@ -657,6 +660,25 @@ class FactoryEnv(DirectRLEnv):
         first_success_ids = first_success.nonzero(as_tuple=False).squeeze(-1)
         self.ep_success_times[first_success_ids] = self.episode_length_buf[first_success_ids]
 
+        # [CUSTOM] RJ45 Phase 2: on first success, replace Z-axis keypoints with random body
+        # keypoints spread across the connector head volume (full XYZ).  Denser signal for
+        # sustained deep insertion once the plug is initially aligned and partially inserted.
+        if self.cfg_task.name == "rj45_insert" and len(first_success_ids) > 0:
+            ns = self.cfg_task.num_success_kp
+            r = torch.rand((len(first_success_ids), ns, 3), device=self.device)
+            self.kp_rj45_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.040 - 0.030
+            self.kp_rj45_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.033 - 0.005
+            self.kp_rj45_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.014 - 0.014
+
+        # [CUSTOM] BNC Phase 2: on first success, replace Z-axis keypoints with random body
+        # keypoints (XY ∈ ±11mm, Z ∈ [-60mm, 0]) for denser insertion guidance.
+        if self.cfg_task.name == "bnc_insert" and len(first_success_ids) > 0:
+            ns = self.cfg_task.num_success_kp
+            r = torch.rand((len(first_success_ids), ns, 3), device=self.device)
+            self.kp_bnc_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.022 - 0.011
+            self.kp_bnc_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.022 - 0.011
+            self.kp_bnc_local[first_success_ids, :ns, 2] = -r[:, :, 2] * 0.060
+
         # [CUSTOM] For box_lid_insert: on first success, keep the 2 clip keypoints (index 0,1)
         # and replace index 2..2+ns-1 with random keypoints spread across the lid body.
         # Updated here so the NEXT call to _get_factory_rew_dict picks up the new keypoints.
@@ -827,28 +849,25 @@ class FactoryEnv(DirectRLEnv):
         self.randomize_initial_state(env_ids)
 
         # [CUSTOM] Keypoints for rj45_insert.
-        # At full insertion male plug origin = female socket origin, so the same random
-        # local-frame offset maps to the same world position → keypoint_dist → 0.
-        # Sample 5 random points within the connector-body bounding volume (metres):
-        #   X ∈ [-0.030,  0.010]  (40 mm wide, centred on connector cross-section)
-        #   Y ∈ [-0.005,  0.028]  (33 mm deep)
-        #   Z ∈ [-0.014,  0.000]  (connector head, tip at -13.98 mm up to origin)
+        # [CUSTOM] RJ45 Phase 1: Z-axis keypoints only (X=Y=0), sampled along the plug Z axis.
+        # Pure Z spread drives XY alignment and approach direction without the "push straight
+        # down" bias that full random body keypoints introduce.
+        # Remaining slots stay zero → distance = |held_pos.xy - fixed_pos.xy|, still a valid XY signal.
+        # Phase 2 switch (random body keypoints) is triggered on first success in _log_factory_metrics.
         if self.cfg_task.name == "rj45_insert":
-            n_kp = self.kp_rj45_local.shape[1]
-            r = torch.rand((len(env_ids), n_kp, 3), device=self.device)
-            self.kp_rj45_local[env_ids, :, 0] = r[:, :, 0] * 0.040 - 0.030
-            self.kp_rj45_local[env_ids, :, 1] = r[:, :, 1] * 0.033 - 0.005
-            self.kp_rj45_local[env_ids, :, 2] = r[:, :, 2] * 0.014 - 0.014
+            nr = self.cfg_task.num_reset_kp
+            self.kp_rj45_local[env_ids] = 0.0
+            r = torch.rand((len(env_ids), nr), device=self.device)
+            # Z ∈ [tip, cable_top] = [-13.98mm, +77.49mm] in plug USD origin frame
+            self.kp_rj45_local[env_ids, :nr, 2] = r * (0.07749 + 0.01398) - 0.01398
 
-        # [CUSTOM] BNC per-episode random body keypoints.
-        # kp_bnc_local offsets are in the held_base frame (tip of male / socket opening).
-        # X,Y ∈ [-11mm, +11mm] (connector radius ~11mm); Z ∈ [-60mm, 0] (body extends away from tip).
+        # [CUSTOM] BNC Phase 1: Z-axis keypoints in the tip frame (X=Y=0, Z ∈ [-60mm, 0]).
+        # Same rationale as RJ45: avoids straight-down bias before XY alignment is achieved.
         if self.cfg_task.name == "bnc_insert":
-            n_kp = self.kp_bnc_local.shape[1]
-            r = torch.rand((len(env_ids), n_kp, 3), device=self.device)
-            self.kp_bnc_local[env_ids, :, 0] = r[:, :, 0] * 0.022 - 0.011
-            self.kp_bnc_local[env_ids, :, 1] = r[:, :, 1] * 0.022 - 0.011
-            self.kp_bnc_local[env_ids, :, 2] = -r[:, :, 2] * 0.060  # [−60mm, 0]
+            nr = self.cfg_task.num_reset_kp
+            self.kp_bnc_local[env_ids] = 0.0
+            r = torch.rand((len(env_ids), nr), device=self.device)
+            self.kp_bnc_local[env_ids, :nr, 2] = -r * 0.060  # Z ∈ [-60mm, 0]
 
         # [CUSTOM] Keypoints for box_lid_insert.
         # At success pose lid origin = box origin, so kp_box_local == kp_lid_local.
