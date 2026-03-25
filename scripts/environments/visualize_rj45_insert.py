@@ -56,7 +56,6 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import math
-from collections import deque
 
 import carb
 import carb.input
@@ -269,35 +268,19 @@ def _draw_markers(inner):
 
 
 # ---------------------------------------------------------------------------
-# Success / engaged tracking
-# ---------------------------------------------------------------------------
-_success_count  = 0
-_engaged_count  = 0
-_total_count    = 0
-_recent_success: deque = deque(maxlen=100)
-_recent_engaged: deque = deque(maxlen=100)
-
-
-def _track(successes, engaged):
-    global _success_count, _engaged_count, _total_count
-    _total_count   += 1
-    _success_count += int(successes.any().item())
-    _engaged_count += int(engaged.any().item())
-    _recent_success.append(successes.float().mean().item())
-    _recent_engaged.append(engaged.float().mean().item())
-
-
-def _reset_counters():
-    global _success_count, _engaged_count, _total_count
-    _success_count = _engaged_count = _total_count = 0
-    _recent_success.clear()
-    _recent_engaged.clear()
-
-
-# ---------------------------------------------------------------------------
 # Diagnostic print
 # ---------------------------------------------------------------------------
-def _print_info(inner, step, successes, engaged):
+def _print_status(step, successes, engaged):
+    """One-liner per step: instantaneous counts."""
+    n = successes.shape[0]
+    n_eng  = engaged.sum().item()
+    n_succ = successes.sum().item()
+    state0 = "SUCCESS" if successes[0].item() else ("ENGAGED" if engaged[0].item() else "waiting")
+    print(f"[step {step:5d}]  engaged={n_eng}/{n}  success={n_succ}/{n}  env0={state0}")
+
+
+def _print_geometry(inner, step, successes, engaged):
+    """Detailed geometry dump every N steps."""
     device   = inner.device
     num_envs = inner.num_envs
 
@@ -308,24 +291,20 @@ def _print_info(inner, step, successes, engaged):
 
     ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(num_envs, -1)
 
-    # Connector tip (world frame).
     tip_loc = torch.tensor(_TIP_LOCAL, device=device).expand(num_envs, -1).clone()
     _, tip_w = torch_utils.tf_combine(held_quat, held_pos, ident_q, tip_loc)
 
-    # Socket opening (world frame).
     opening_loc = torch.tensor(_OPENING_LOCAL, device=device).expand(num_envs, -1).clone()
     _, opening_w = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, opening_loc)
 
     delta   = (tip_w[0] - opening_w[0]).cpu()
-    xy_dist = delta[:2].norm().item() * 1000     # mm
-    z_disp  = delta[2].item() * 1000             # mm  (<0 = tip inside socket)
+    xy_dist = delta[:2].norm().item() * 1000
+    z_disp  = delta[2].item() * 1000
 
-    # Origin-to-origin delta.
     orig_delta = (held_pos[0] - fixed_pos[0]).cpu()
     orig_xy    = orig_delta[:2].norm().item() * 1000
     orig_z     = orig_delta[2].item() * 1000
 
-    # Keypoint distance (mean over all kps, env 0).
     kp_dist_mm = float("nan")
     if hasattr(inner, "kp_rj45_local"):
         n_kp = inner.kp_rj45_local.shape[1]
@@ -336,28 +315,17 @@ def _print_info(inner, step, successes, engaged):
             kp_dists.append((kp_h[0] - kp_t[0]).norm().item())
         kp_dist_mm = sum(kp_dists) / len(kp_dists) * 1000
 
-    state_str = "SUCCESS" if successes[0].item() else ("ENGAGED" if engaged[0].item() else "WAITING")
-
-    cr = (_success_count / _total_count * 100) if _total_count > 0 else 0.0
-    er = (_engaged_count / _total_count * 100) if _total_count > 0 else 0.0
-    rs = (sum(_recent_success) / len(_recent_success) * 100) if _recent_success else 0.0
-    re = (sum(_recent_engaged) / len(_recent_engaged) * 100) if _recent_engaged else 0.0
-
     off_mm  = [_pos_xy_offset[0]*1000, _pos_xy_offset[1]*1000, _pos_z_offset*1000]
     eul_deg = [math.degrees(x) for x in _euler_offset]
 
     print(
-        f"[step {step:5d}] env0={state_str}"
-        f"  engaged={_engaged_count}/{_total_count}({er:.0f}%)"
-        f"  success={_success_count}/{_total_count}({cr:.0f}%)"
-        f"  recent-engaged={re:.0f}%  recent-success={rs:.0f}%\n"
         f"  offset from socket: X={off_mm[0]:+.1f} Y={off_mm[1]:+.1f} Z={off_mm[2]:+.1f} mm"
         f"  euler=[{eul_deg[0]:+.1f},{eul_deg[1]:+.1f},{eul_deg[2]:+.1f}] deg\n"
         f"  tip -> opening: XY={xy_dist:.2f} mm  Z={z_disp:+.2f} mm (<0=inside socket)\n"
         f"  origin -> origin: XY={orig_xy:.2f} mm  Z={orig_z:+.2f} mm\n"
-        f"  mean kp_dist: {kp_dist_mm:.2f} mm  (0=origins aligned)\n"
-        f"  ENGAGE fires when: |XY|<5mm, Z<40mm, |yaw|<20 deg, tilt<15 deg\n"
-        f"  SUCCESS fires when: Z<{inner.cfg_task.fixed_asset_cfg.height * inner.cfg_task.success_threshold * 1000:.1f} mm AND |XY|<3mm"
+        f"  mean kp_dist: {kp_dist_mm:.2f} mm\n"
+        f"  ENGAGE: |XY|<5mm, Z<40mm, |yaw|<20 deg, tilt<15 deg  |  "
+        f"SUCCESS: Z<{inner.cfg_task.fixed_asset_cfg.height * inner.cfg_task.success_threshold * 1000:.1f} mm AND |XY|<3mm"
     )
 
 
@@ -432,15 +400,14 @@ def main():
 
             engaged   = inner._get_curr_successes(success_threshold=inner.cfg_task.engage_threshold)
             successes = inner._get_curr_successes(success_threshold=inner.cfg_task.success_threshold)
-            _track(successes, engaged)
 
+            _print_status(step, successes, engaged)
             if step % 10 == 0:
-                _print_info(inner, step, successes, engaged)
+                _print_geometry(inner, step, successes, engaged)
 
             if torch.any(done | trunc):
                 env.reset()
                 step = 0
-                _reset_counters()
                 print("[INFO] Episode reset.")
 
     env.close()
