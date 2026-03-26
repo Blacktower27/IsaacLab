@@ -595,7 +595,7 @@ class ForgeBNCSmallInsert(ForgeTask):
     duration_s: float = 20.0
 
     # --- Robot initial state (relative to socket opening) ---
-    hand_init_pos: list = [0.00, 0.00, 0.05]
+    hand_init_pos: list = [0.00, 0.00, 0.07]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0.0, 0.0]
     hand_init_orn_noise: list = [0.0, 0.0, 0.0]

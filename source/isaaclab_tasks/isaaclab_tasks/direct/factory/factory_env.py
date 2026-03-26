@@ -610,7 +610,7 @@ class FactoryEnv(DirectRLEnv):
             _, _, sock_yaw = torch_utils.get_euler_xyz(self.fixed_quat)
             yaw_diff_raw = (plug_yaw - sock_yaw + torch.pi) % (2 * torch.pi) - torch.pi  # [-π, π]
             yaw_diff_sym = torch.minimum(yaw_diff_raw.abs(), torch.pi - yaw_diff_raw.abs())  # [0, π/2]
-            _YAW_TOL = 0.209  # 12° = π/15
+            _YAW_TOL = 0.175  # 10° = π/18
             is_yaw = yaw_diff_sym < _YAW_TOL
 
             if success_threshold > 1.0:
@@ -630,7 +630,9 @@ class FactoryEnv(DirectRLEnv):
                 # 4. Z (loose): tip within 40 mm above socket opening.
                 is_z = z_disp < 0.040
 
-                curr_successes = is_xy & is_yaw & is_tilt & is_z
+                # After first success the plug is latched — yaw no longer required.
+                already_succeeded = self.ep_succeeded.bool()
+                curr_successes = is_xy & (is_yaw | already_succeeded) & is_tilt & is_z
             else:
                 # ── SUCCESS check ─────────────────────────────────────────────────
                 # Tip must be inside socket by |success_threshold × height| metres,
@@ -639,7 +641,10 @@ class FactoryEnv(DirectRLEnv):
                 height_threshold = fixed_cfg.height * success_threshold
                 is_inside    = z_disp < height_threshold
                 is_xy_strict = xy_dist < 0.003
-                curr_successes = is_inside & is_xy_strict & is_yaw
+                # After first success the plug is latched — yaw no longer required,
+                # only Z depth and XY alignment matter for sustained success.
+                already_succeeded = self.ep_succeeded.bool()
+                curr_successes = is_inside & is_xy_strict & (is_yaw | already_succeeded)
 
         else:
             raise NotImplementedError("Task not implemented")
@@ -683,13 +688,15 @@ class FactoryEnv(DirectRLEnv):
             self.kp_rj45_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.014
 
         # [CUSTOM] BNC Phase 2: on first success, replace Z-axis keypoints with random body
-        # keypoints (XY ∈ ±11mm, Z ∈ [-60mm, 0]) for denser insertion guidance.
+        # keypoints spread across the connector region inside the socket.
+        # Full insertion: tip at socket_origin - 4.765mm; socket opening at +25mm above origin
+        # → inserted region in held_base frame: Z ∈ [0, +30mm], XY ∈ ±11mm (connector radius).
         if self.cfg_task.name == "bnc_insert" and len(first_success_ids) > 0:
             ns = self.cfg_task.num_success_kp
             r = torch.rand((len(first_success_ids), ns, 3), device=self.device)
-            self.kp_bnc_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.022 - 0.011
-            self.kp_bnc_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.022 - 0.011
-            self.kp_bnc_local[first_success_ids, :ns, 2] = -r[:, :, 2] * 0.060
+            self.kp_bnc_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.022 - 0.011  # X ∈ [-11, +11] mm
+            self.kp_bnc_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.022 - 0.011  # Y ∈ [-11, +11] mm
+            self.kp_bnc_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.030           # Z ∈ [0, +30] mm
 
         # [CUSTOM] For box_lid_insert: on first success, keep the 2 clip keypoints (index 0,1)
         # and replace index 2..2+ns-1 with random keypoints spread across the lid body.
@@ -880,13 +887,14 @@ class FactoryEnv(DirectRLEnv):
             # Z ∈ [0, +91.47mm] = tip to cable top = (height + |base_height|) = 0.08847 + 0.003
             self.kp_rj45_local[env_ids, :nr, 2] = r * (0.08847 + 0.003)
 
-        # [CUSTOM] BNC Phase 1: Z-axis keypoints in the tip frame (X=Y=0, Z ∈ [-60mm, 0]).
-        # Same rationale as RJ45: avoids straight-down bias before XY alignment is achieved.
+        # [CUSTOM] BNC Phase 1: Z-axis keypoints along connector body (X=Y=0, Z ∈ [0, +77mm]).
+        # Z=0 is tip (held_base origin); Z>0 is up the connector body in held_base local frame.
+        # Pure Z spread drives XY alignment and approach without straight-down bias.
         if self.cfg_task.name == "bnc_insert":
             nr = self.cfg_task.num_reset_kp
             self.kp_bnc_local[env_ids] = 0.0
             r = torch.rand((len(env_ids), nr), device=self.device)
-            self.kp_bnc_local[env_ids, :nr, 2] = -r * 0.060  # Z ∈ [-60mm, 0]
+            self.kp_bnc_local[env_ids, :nr, 2] = r * 0.077  # Z ∈ [0, +77mm] (tip to cable end)
 
         # [CUSTOM] Keypoints for box_lid_insert.
         # At success pose lid origin = box origin, so kp_box_local == kp_lid_local.
