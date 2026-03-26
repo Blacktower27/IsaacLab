@@ -408,50 +408,23 @@
     <!-- <origin rpy="0 0 0" xyz="0.00243 0.0003 0.22498"/> -->
     <origin rpy="0 0 1.5708" xyz="0.00243 0.0003 0.3325"/>
   </joint>
-  <!-- RJ45 Male plug — fixed to link_tcp. xyz/rpy to be tuned via debug observe.
-       STL was modelled X-up; after -90Y conversion the connector tip is at sim_Z=-0.014 m
-       (below USD origin) and the cable end is at sim_Z=+0.077 m (above origin).
-       PLACEHOLDER transform: xyz/rpy set to zero — tune with debug observe before training. -->
   <link name="link_rj45">
     <inertial>
       <mass value="0.01"/>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
     </inertial>
-    <!-- USD is already in metres (scale baked in during STL→USD conversion). -->
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="../../../../rj45/medium/Adi_Medium_RJ45_Male_Raw_Colored.usd" scale="1 1 1"/>
-        <!-- <mesh filename="../../../../rj45/medium/Adi_Medium_RJ45_Male_Raw_Colored.stl" scale="0.001 0.001 0.001"/> -->
+        <mesh filename="../../../../rj45/medium/rs_male_rj45.usd" scale="1 1 1"/>
+        <!-- <mesh filename="../../../../rj45/medium/rs_male_rj45.stl" scale="0.001 0.001 0.001"/> -->
       </geometry>
     </visual>
-    <!-- <collision>
-      <origin rpy="0 0 0" xyz="0 0 0"/>
-      <geometry>
-        <mesh filename="../../../../rj45/medium/Adi_Medium_RJ45_Male_Raw_Colored.usd" scale="1 1 1"/>
-      </geometry>
-    </collision> -->
   </link>
   <joint name="joint_rj45" type="fixed">
     <parent link="link_tcp"/>
     <child link="link_rj45"/>
-    <!-- Grip geometry (all in plug local frame, metres, after STL→USD 0.001 scale):
-         rpy="π 0 0" (Rx(π)): plug local +Z → link_tcp −Z (connector tip points toward socket),
-                               plug local +Y → link_tcp −Y, plug local +X → link_tcp +X unchanged.
-
-         Grip target: cable strain-relief narrowing at plug_Z ≈ +0.063 m
-           Xspan = 12 mm (fits gripper X-close gap ≈ 15 mm), Yspan = 4 mm ✓
-           Cross-section centre: Xcen = −13.8 mm, Ycen = +5.6 mm (plug local).
-
-         joint xyz = (x_j, y_j, z_j):
-           z_j = 0.040 → grip centre at link_tcp Z = 0.040 − 0.063 = −0.023 m (23 mm into finger body) ✓
-           x_j = 0.014 → X_tcp = Xcen + x_j = −0.0138 + 0.014 ≈ 0    (centred in gripper X) ✓
-           y_j = 0.006 → Y_tcp = −Ycen + y_j = −0.0056 + 0.006 ≈ 0   (centred in gripper Y) ✓
-
-         Result in link_tcp frame:
-           Connector tip (plug_Z = −0.014 m) → link_tcp Z = +0.054 m (54 mm toward socket)
-           Cable end    (plug_Z = +0.077 m) → link_tcp Z = −0.037 m (37 mm into finger body) -->
-    <origin rpy="3.14159 0 0" xyz="0.01 0.008 0.050"/>
+    <origin rpy="3.14159 0 0" xyz="0.0 0.0 0.0"/>
   </joint>
 </robot>

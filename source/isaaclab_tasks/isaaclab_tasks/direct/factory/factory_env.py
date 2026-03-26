@@ -526,10 +526,16 @@ class FactoryEnv(DirectRLEnv):
             # [CUSTOM] RJ45 insertion — two distinct checks dispatched by threshold value:
             #
             #   engage_threshold  > 1.0  (e.g. 2.0)  → ENGAGE: XY alignment + yaw + tilt
-            #   success_threshold < 0    (e.g. -0.24) → SUCCESS: tip inside socket (sustained)
+            #   success_threshold < 0    (e.g. -0.002) → SUCCESS: tip at full-insertion depth
+            #
+            # Empirically calibrated cavity position (socket-local frame):
+            #   Y = -0.006 m  (cavity centre offset from socket USD origin)
+            #   Z = +0.014 m  (target tip position = cavity_entrance 0.017 - tip_offset 0.003)
+            # z_disp = 0 at full insertion; negative = tip deeper than target.
             ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).expand(self.num_envs, -1)
             socket_opening_local = torch.zeros((self.num_envs, 3), device=self.device)
-            socket_opening_local[:, 2] = fixed_cfg.height  # opening in socket local frame
+            socket_opening_local[:, 1] = -0.006   # cavity centre Y offset
+            socket_opening_local[:, 2] =  0.014   # target tip Z at full insertion
             _, socket_opening_world = torch_utils.tf_combine(
                 self.fixed_quat, self.fixed_pos, ident_q, socket_opening_local
             )
@@ -540,10 +546,11 @@ class FactoryEnv(DirectRLEnv):
 
             if success_threshold > 1.0:
                 # ── ENGAGE check ──────────────────────────────────────────────────────
-                _XY_TOL = 0.004
+                # XY: tip within 8 mm of cavity centre (accounts for -6 mm Y offset).
+                _XY_TOL = 0.008
                 is_xy = xy_dist < _XY_TOL
 
-                # Yaw: plug yaw should match socket yaw within ±20°.
+                # Yaw: plug yaw should match socket yaw within ±15°.
                 _, _, plug_yaw = torch_utils.get_euler_xyz(self.held_quat)
                 _, _, sock_yaw = torch_utils.get_euler_xyz(self.fixed_quat)
                 yaw_diff = (plug_yaw - sock_yaw + torch.pi) % (2 * torch.pi) - torch.pi
@@ -556,14 +563,17 @@ class FactoryEnv(DirectRLEnv):
                 cos_tilt = -plug_z_world[:, 2]
                 is_tilt = cos_tilt > 0.966  # deviation < ~15°
 
-                # Z (loose): tip must be within 40 mm above the socket opening.
-                is_z = z_disp < 0.040
+                # Z (loose): tip within 40 mm above the target tip position.
+                # At engage zone (30 mm above cavity): z_disp = 0.030 < 0.040 ✓
+                is_z = z_disp < 0.06
 
                 curr_successes = is_xy & is_yaw & is_tilt & is_z
             else:
-                # ── SUCCESS check ─────────────────────────────────────────────────
-                _XY_STRICT = 0.003
-                height_threshold = fixed_cfg.height * success_threshold
+                # ── SUCCESS check ──────────────────────────────────────────────────
+                # height_threshold = 0.0 + success_threshold = -0.002 m.
+                # Fires when tip is 2 mm below the full-insertion target (z_disp < -0.002).
+                _XY_STRICT = 0.008
+                height_threshold = fixed_cfg.height + success_threshold
                 is_inside = z_disp < height_threshold
                 is_xy_strict = xy_dist < _XY_STRICT
                 curr_successes = is_inside & is_xy_strict
@@ -666,9 +676,11 @@ class FactoryEnv(DirectRLEnv):
         if self.cfg_task.name == "rj45_insert" and len(first_success_ids) > 0:
             ns = self.cfg_task.num_success_kp
             r = torch.rand((len(first_success_ids), ns, 3), device=self.device)
-            self.kp_rj45_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.040 - 0.030
-            self.kp_rj45_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.033 - 0.005
-            self.kp_rj45_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.014 - 0.014
+            # Offsets in TIP frame (Z=0 at tip).  Connector cross-section + shallow depth zone.
+            # X ∈ [-18.75mm, +18.75mm], Y ∈ [-5mm, +13mm], Z ∈ [0, +14mm] (tip → connector face area)
+            self.kp_rj45_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.0375 - 0.01875
+            self.kp_rj45_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.0182 - 0.00503
+            self.kp_rj45_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.014
 
         # [CUSTOM] BNC Phase 2: on first success, replace Z-axis keypoints with random body
         # keypoints (XY ∈ ±11mm, Z ∈ [-60mm, 0]) for denser insertion guidance.
@@ -740,22 +752,28 @@ class FactoryEnv(DirectRLEnv):
                 )
         elif self.cfg_task.name == "rj45_insert":
             # [CUSTOM] Per-episode random body keypoints for rj45_insert.
-            # At full insertion the male plug USD origin coincides with the female socket
-            # USD origin (same XY/Z world position, same orientation).  Using the SAME
-            # random local-frame offset in both frames therefore gives:
-            #   keypoint_dist → 0  iff  held_pos == fixed_pos  AND  held_quat == fixed_quat
-            # This provides a dense gradient signal from the initial approach all the way
-            # to the fully-inserted mated state (unlike a fixed tip-face target that
-            # saturates as soon as the tip reaches the socket opening).
+            # Empirically: full insertion has plug_origin at socket_local [Y=-6mm, Z=+17mm],
+            # so the raw USD origins do NOT coincide.  We use held_base / target_held_base
+            # (which encode the calibrated offset via get_target_held_base_pose) so that
+            #   keypoint_dist → 0  iff  held_base_pos == target_held_base_pos
+            # This mirrors the approach used for bnc_insert.
+            held_base_pos_kp, held_base_quat_kp = factory_utils.get_held_base_pose(
+                self.held_pos, self.held_quat, self.cfg_task.name,
+                self.cfg_task.fixed_asset_cfg, self.num_envs, self.device,
+            )
+            target_base_pos_kp, target_base_quat_kp = factory_utils.get_target_held_base_pose(
+                self.fixed_pos, self.fixed_quat, self.cfg_task.name,
+                self.cfg_task.fixed_asset_cfg, self.num_envs, self.device,
+            )
             n_kp = self.kp_rj45_local.shape[1]
             keypoints_held  = torch.zeros((self.num_envs, n_kp, 3), device=self.device)
             keypoints_fixed = torch.zeros((self.num_envs, n_kp, 3), device=self.device)
             for i in range(n_kp):
                 _, keypoints_held[:, i]  = torch_utils.tf_combine(
-                    self.held_quat,  self.held_pos,  ident, self.kp_rj45_local[:, i]
+                    held_base_quat_kp,   held_base_pos_kp,   ident, self.kp_rj45_local[:, i]
                 )
                 _, keypoints_fixed[:, i] = torch_utils.tf_combine(
-                    self.fixed_quat, self.fixed_pos, ident, self.kp_rj45_local[:, i]
+                    target_base_quat_kp, target_base_pos_kp, ident, self.kp_rj45_local[:, i]
                 )
         elif self.cfg_task.name == "bnc_insert":
             # [CUSTOM] Per-episode random body keypoints for bnc_insert.
@@ -858,8 +876,9 @@ class FactoryEnv(DirectRLEnv):
             nr = self.cfg_task.num_reset_kp
             self.kp_rj45_local[env_ids] = 0.0
             r = torch.rand((len(env_ids), nr), device=self.device)
-            # Z ∈ [tip, cable_top] = [-13.98mm, +77.49mm] in plug USD origin frame
-            self.kp_rj45_local[env_ids, :nr, 2] = r * (0.07749 + 0.01398) - 0.01398
+            # Offsets are in the TIP frame (held_base frame: Z=0 at tip, Z=+91.47mm at cable top).
+            # Z ∈ [0, +91.47mm] = tip to cable top = (height + |base_height|) = 0.08847 + 0.003
+            self.kp_rj45_local[env_ids, :nr, 2] = r * (0.08847 + 0.003)
 
         # [CUSTOM] BNC Phase 1: Z-axis keypoints in the tip frame (X=Y=0, Z ∈ [-60mm, 0]).
         # Same rationale as RJ45: avoids straight-down bias before XY alignment is achieved.
@@ -1243,17 +1262,30 @@ class FactoryEnv(DirectRLEnv):
                 hand_down_euler[:, 2] += yaw_noise
                 hand_down_euler[:, 1] += pitch_noise
 
-            # Far-mode yaw alignment for rj45_insert and bnc_insert (no pitch noise).
-            # Near mode keeps hand_init_orn yaw as-is (fixed directly above socket).
-            # Far mode aligns plug yaw to socket yaw ± noise; BNC picks 0° or 180° base.
+            # Yaw alignment for rj45_insert and bnc_insert.
+            # Both near and far modes align plug yaw to socket yaw so the connector
+            # faces the opening regardless of socket randomisation.
+            # Far mode adds ± yaw noise on top; near mode is exact.
             if self.cfg_task.name in ("rj45_insert", "bnc_insert"):
+                # RJ45 connector face is rotated 90° relative to the socket in the robot frame,
+                # so add a 90° yaw offset on top of the socket yaw to align properly.
+                # _yaw_offset = 0.5 * torch.pi if self.cfg_task.name == "rj45_insert" else 0.0
+                _yaw_offset=0.0
+
+                # Near mode: exact socket yaw alignment (no noise).
+                near_mask = _is_near[bad_envs]
+                if near_mask.any():
+                    _, _, sock_yaw_near = torch_utils.get_euler_xyz(self.fixed_quat[bad_envs[near_mask]])
+                    hand_down_euler[near_mask, 2] = sock_yaw_near + _yaw_offset
+
+                # Far mode: socket yaw ± noise; BNC also picks 0° or 180° base.
                 far_mask = ~_is_near[bad_envs]
                 if far_mask.any():
                     n_far = int(far_mask.sum())
                     yaw_deg = getattr(self.cfg_task, "hand_init_yaw_noise_deg", 0.0)
                     _, _, sock_yaw = torch_utils.get_euler_xyz(self.fixed_quat[bad_envs[far_mask]])
                     yaw_noise = (torch.rand(n_far, device=self.device) * 2 - 1) * np.deg2rad(yaw_deg)
-                    base_yaw = sock_yaw.clone()
+                    base_yaw = sock_yaw.clone() + _yaw_offset
                     if self.cfg_task.name == "bnc_insert":
                         # Two valid bayonet orientations: 0° or 180° relative to socket yaw.
                         flip = torch.randint(0, 2, (n_far,), device=self.device).float() * torch.pi

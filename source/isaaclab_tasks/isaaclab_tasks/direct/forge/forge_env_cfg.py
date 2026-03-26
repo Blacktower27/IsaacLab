@@ -337,7 +337,7 @@ _KUKA_RJ45_URDF = _os.path.normpath(
 class ForgeTaskRJ45InsertCfg(ForgeEnvCfg):
     task_name = "rj45_insert"
     task = ForgeRJ45Insert()
-    episode_length_s = 10.0
+    episode_length_s = 20.0
 
 
 @configclass
@@ -444,7 +444,7 @@ _KUKA_BNC_SMALL_URDF = _os.path.normpath(
 class ForgeTaskBNCSmallInsertCfg(ForgeEnvCfg):
     task_name = "bnc_insert"
     task = ForgeBNCSmallInsert()
-    episode_length_s = 10.0
+    episode_length_s = 20.0
 
 
 @configclass

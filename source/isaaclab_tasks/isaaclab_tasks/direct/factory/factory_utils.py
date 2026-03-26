@@ -19,13 +19,14 @@ def get_keypoint_offsets(num_keypoints, device):
 def get_rj45_tip_keypoint_offsets(device):
     """5 keypoints spread across the RJ45 male connector face (held-base / tip frame).
 
-    The held_base for rj45_insert tracks the connector TIP (sim_Z = -13.98 mm from
-    the USD origin), so held_base frame has Z=0 at the tip face.
+    The held_base for rj45_insert tracks the connector TIP (sim_Z = -3.0 mm from
+    the USD origin), so held_base frame has Z=0 at the physical tip face.
 
-    Offsets below are derived from the male plug STL bounds after 0.001 m/mm scale:
-        X ∈ [-0.0292,  0.0083]  (40 mm wide)
-        Y ∈ [ 0.0006,  0.0188]  (18.2 mm deep)
-        Z =  0.0              (tip face plane)
+    Offsets below are derived from the male plug STL bounds after 0.001 m/mm scale.
+    New STL origin is at the connector mating face (Z=0); tip is 3 mm below (Z=-3 mm):
+        X ∈ [-0.01875, +0.01875]  (37.5 mm wide connector face)
+        Y ∈ [-0.00503, +0.01318]  (18.2 mm deep)
+        Z =  0.0                  (tip face plane, = held_base Z=0)
 
     The same offsets are applied to both the held asset (plug tip) and the target
     (socket opening, via target_held_base_quat/pos).  At the assembled state the two
@@ -35,11 +36,11 @@ def get_rj45_tip_keypoint_offsets(device):
     """
     return torch.tensor(
         [
-            [-0.0105,  0.0097,  0.0],  # face centre
-            [-0.0292,  0.0188,  0.0],  # left-front corner
-            [ 0.0083,  0.0188,  0.0],  # right-front corner
-            [-0.0292,  0.0006,  0.0],  # left-back corner
-            [ 0.0083,  0.0006,  0.0],  # right-back corner
+            [ 0.00000,  0.00408,  0.0],  # face centre
+            [-0.01875,  0.01318,  0.0],  # left-front corner
+            [ 0.01875,  0.01318,  0.0],  # right-front corner
+            [-0.01875, -0.00503,  0.0],  # left-back corner
+            [ 0.01875, -0.00503,  0.0],  # right-back corner
         ],
         dtype=torch.float32,
         device=device,
@@ -100,11 +101,11 @@ def get_held_base_pos_local(task_name, fixed_asset_cfg, num_envs, device):
         held_base_z_offset = 0.0188  # = LidYellowCfg.base_height
     elif task_name == "rj45_insert":
         # [CUSTOM] RJ45 male plug: the connector tip (insertion end) sits BELOW
-        # the USD prim origin.  After the -90° Y rotation applied during STL→USD
-        # conversion (X-up → Z-up), the connector tip is at sim_Z = -13.98 mm.
-        # Shifting by -0.01398 transforms the tracked reference from the USD root
+        # the USD prim origin.  The new STL has its origin at the connector mating face,
+        # placing the physical connector tip at sim_Z = -3.0 mm.
+        # Shifting by -0.003 transforms the tracked reference from the USD root
         # to the physical connector tip — the face that must reach the socket opening.
-        held_base_z_offset = -0.01398  # = RJ45MaleCfg.base_height (negative → tip below origin)
+        held_base_z_offset = -0.003  # = RJ45MaleCfg.base_height (negative → tip below origin)
     elif task_name == "bnc_insert":
         # [CUSTOM] BNC Small male plug: the connector tip (insertion end) sits ABOVE
         # the USD prim origin.  The STL has Z in [+36.235, +107.201] mm, so the origin
@@ -163,22 +164,20 @@ def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg,
         _LID_BASE_HEIGHT = 0.0188  # must match LidYellowCfg.base_height
         fixed_success_pos_local[:, 2] = _LID_BASE_HEIGHT
     elif task_name == "rj45_insert":
-        # [CUSTOM] RJ45 insertion geometry (values in metres, scale ×0.001):
+        # [CUSTOM] RJ45 insertion geometry (empirically calibrated, values in metres):
         #
-        # Female socket (fixed): USD origin is 22.23 mm above the socket base.
-        #   Socket opening (top face) is at female-local sim_Z = +29.22 mm = 0.02922 m.
+        # Empirical finding: "full insertion" has plug origin at socket-local:
+        #   Y = -0.006 m  (cavity centre is 6 mm in -Y from socket USD origin)
+        #   Z = +0.017 m  (cavity entrance is 17 mm above socket USD origin)
         #
-        # Male plug (held): connector TIP is at male-local sim_Z = -13.98 mm (tracked
-        #   as held_base via the -0.01398 offset in get_held_base_pos_local).
-        #
-        # Target: the connector tip should reach the socket opening level.
-        #   (expressed in female's local frame; tf_combine adds fixed_pos in world frame).
+        # held_base tracks the connector TIP (3 mm below plug origin, held_base_z_offset=-0.003).
+        # At full insertion: tip is at socket-local Y=-0.006 m, Z = 0.017 - 0.003 = +0.014 m.
         #
         # NOTE: keypoint reward for rj45_insert does NOT use this target — it uses
         # per-episode random body keypoints sampled at reset (see _reset_idx / _get_factory_rew_dict).
-        # This value is kept for visualisation (visualize_rj45_success_kuka.py) and
-        # any code that calls get_target_held_base_pose outside of keypoint computation.
-        fixed_success_pos_local[:, 2] = fixed_asset_cfg.height  # = 0.02922 m (socket opening)
+        # This value drives success detection and visualisation.
+        fixed_success_pos_local[:, 1] = -0.006   # cavity centre Y offset
+        fixed_success_pos_local[:, 2] =  0.014   # tip Z at full insertion
     elif task_name == "bnc_insert":
         # [CUSTOM] BNC Small insertion geometry (values in metres, scale ×0.001):
         #
