@@ -187,8 +187,10 @@ def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg,
         # Male plug (held): connector TIP is at male-local sim_Z = +36.235 mm (tracked
         #   as held_base via the +0.036235 offset in get_held_base_pos_local).
         #
-        # Target: the connector tip should reach the socket opening level.
-        fixed_success_pos_local[:, 2] = fixed_asset_cfg.height  # = 0.025 m (socket opening)
+        # Empirical full insertion (visualizer calibration): plug origin at socket_origin + Z = -41 mm.
+        # Tip (held_base) at full insertion: -41 + 36.235 = -4.765 mm from socket origin.
+        # This is the target for keypoint convergence (keypoint_dist → 0 at full insertion).
+        fixed_success_pos_local[:, 2] = -0.004765  # tip Z at full insertion (empirical)
     else:
         raise NotImplementedError("Task not implemented")
     fixed_success_quat_local = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).repeat(num_envs, 1)

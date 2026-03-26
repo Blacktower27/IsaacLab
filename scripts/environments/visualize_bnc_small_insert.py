@@ -325,6 +325,30 @@ def _print_geometry(inner, step, successes, engaged):
         f"SUCCESS: Z<{inner.cfg_task.fixed_asset_cfg.height * inner.cfg_task.success_threshold * 1000:.1f} mm AND |XY|<3mm"
     )
 
+    # --- Keypoint distances ---
+    if hasattr(inner, "kp_bnc_local"):
+        held_base_pos_kp, held_base_quat_kp = factory_utils.get_held_base_pose(
+            held_pos, held_quat, inner.cfg_task.name,
+            inner.cfg_task.fixed_asset_cfg, num_envs, device,
+        )
+        target_base_pos_kp, target_base_quat_kp = factory_utils.get_target_held_base_pose(
+            fixed_pos, fixed_quat, inner.cfg_task.name,
+            inner.cfg_task.fixed_asset_cfg, num_envs, device,
+        )
+        n_kp = inner.kp_bnc_local.shape[1]
+        dists_mm = []
+        for i in range(n_kp):
+            _, kp_h = torch_utils.tf_combine(
+                held_base_quat_kp, held_base_pos_kp, ident_q, inner.kp_bnc_local[:, i]
+            )
+            _, kp_t = torch_utils.tf_combine(
+                target_base_quat_kp, target_base_pos_kp, ident_q, inner.kp_bnc_local[:, i]
+            )
+            dists_mm.append((kp_h[0] - kp_t[0]).norm().item() * 1000)
+        avg_dist = sum(dists_mm) / len(dists_mm)
+        max_dist = max(dists_mm)
+        print(f"  keypoint_dist: avg={avg_dist:.2f} mm  max={max_dist:.2f} mm  (n_kp={n_kp})")
+
 
 # ---------------------------------------------------------------------------
 # Main
