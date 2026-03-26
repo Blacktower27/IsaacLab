@@ -22,13 +22,13 @@ default:
   rotation: null
 
 assets:
-  Adi_Medium_RJ45_Female_Raw_Colored.stl:
+  rs_female_rj45.stl:
     mass: 0.05
     # Fixed/kinematic asset (socket) — sdf gives exact cavity geometry
     # critical for RJ45 insertion accuracy.
     collision_approximation: sdf
 
-  Adi_Medium_RJ45_Male_Raw_Colored.stl:
+  rs_male_rj45.stl:
     mass: 0.01
     # Dynamic (held) asset — sdf works for dynamic bodies in Isaac Sim 4.x.
     collision_approximation: sdf

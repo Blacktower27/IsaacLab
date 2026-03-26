@@ -327,27 +327,24 @@ class ForgeBoxLidInsert(ForgeTask):
 
 @configclass
 class RJ45FemaleCfg(FixedAssetCfg):
-    """Adi_Medium_RJ45_Female_Raw_Colored.usd — fixed socket, receives the male plug.
+    """rs_female_rj45.usd — fixed socket, receives the male plug.
 
-    STL coordinate system (mm, converted to metres with scale 0.001).
-    STL was modelled X-up; conversion applied -90° rotation around Y so that
-    STL +X → sim +Z (Z-up world frame).
+    STL re-oriented in-place (rotation baked into STL, conversion_config rotation: null).
+    Opening faces +Z; USD origin is at the opening face centre.
 
-    In simulation (after -90° Y rotation):
-        sim_X ∈ [-37.00, 16.10]  →  53.10 mm wide
-        sim_Y ∈ [ -6.88, 24.38]  →  31.25 mm deep
-        sim_Z ∈ [-22.23, 29.22]  →  51.45 mm tall
+    In simulation (scale 0.001):
+        sim_X ∈ [-26.40, +26.70]  →  53.10 mm wide
+        sim_Y ∈ [-18.65, +12.60]  →  31.25 mm deep
+        sim_Z ∈ [-51.45,   0.00]  →  51.45 mm tall
 
-    USD origin is 22.23 mm above the socket base, 29.22 mm below the opening.
+    USD origin = opening face (Z=0).  Socket bottom at Z=-0.05145 m.
     """
 
-    usd_path: str = f"{_RJ45_DIR}/Adi_Medium_RJ45_Female_Raw_Colored.usd"
-    # height = distance from USD origin to socket opening (top face, where plug enters).
-    # The init_state pos.z = 0.02223 already places the USD origin at the correct world
-    # height (socket base flush with table), so no additional base_height offset is needed.
-    height: float = 0.02922  # 29.22 mm
-    # base_height is added to fixed_tip_pos_local in factory_env.py (line 913).
-    # Set to 0.0 since the origin-to-table offset is handled via init_state pos.z.
+    usd_path: str = f"{_RJ45_DIR}/rs_female_rj45.usd"
+    # height = distance from USD origin to socket opening.
+    # Opening IS the USD origin → height = 0.0.
+    height: float = 0.0
+    # base_height is 0.0; origin-to-table offset handled via init_state pos.z.
     base_height: float = 0.0
     mass: float = 0.05
     friction: float = 0.75
@@ -355,33 +352,31 @@ class RJ45FemaleCfg(FixedAssetCfg):
 
 @configclass
 class RJ45MaleCfg(HeldAssetCfg):
-    """Adi_Medium_RJ45_Male_Raw_Colored.usd — held by robot, inserted into socket.
+    """rs_male_rj45.usd — held by robot, inserted into socket.
 
-    STL coordinate system (mm, converted to metres with scale 0.001).
-    STL was modelled X-up; conversion applied -90° rotation around Y so that
-    STL +X → sim +Z (Z-up world frame).
+    STL re-oriented in-place (rotation baked into STL, conversion_config rotation: null).
+    Insertion tip points -Z; USD origin is at the connector mating face.
 
-    In simulation (after -90° Y rotation):
-        sim_X ∈ [-30.45,  9.55]  →  40.00 mm wide
-        sim_Y ∈ [ -5.00, 28.08]  →  33.08 mm deep
-        sim_Z ∈ [-13.98, 77.49]  →  91.47 mm tall
+    In simulation (scale 0.001):
+        sim_X ∈ [-20.00, +20.00]  →  40.00 mm wide
+        sim_Y ∈ [-10.63, +22.54]  →  33.17 mm deep
+        sim_Z ∈ [ -3.00, +88.47]  →  91.47 mm tall
 
-    USD origin sits between connector head and cable body.
-    Connector tip (insertion end): sim_Z = -13.98 mm  (BELOW origin → negative base_height).
-    Cable / grip end:              sim_Z = +77.49 mm  (used as height for EE offset).
+    USD origin = connector mating face (Z=0).  Origins coincide with female at full insertion.
+    Connector tip (insertion end): sim_Z = -3.00 mm.
+    Housing shoulder:              sim_Z = +57.00 mm.
+    Cable / housing top:           sim_Z = +88.47 mm  (used as height for EE offset).
     """
 
-    usd_path: str = f"{_RJ45_DIR}/Adi_Medium_RJ45_Male_Raw_Colored.usd"
+    usd_path: str = f"{_RJ45_DIR}/rs_male_rj45.usd"
     # diameter = estimated grip width of the cable body (~12 mm).
-    # Used by _set_franka_to_default_pose to set gripper finger separation.
     diameter: float = 0.012
-    # height = sim_Z of the cable top from USD origin (grip end, 77.49 mm).
+    # height = sim_Z of the cable/housing top from USD origin (+88.47 mm).
     # Used in get_handheld_asset_relative_pose to compute the EE → asset offset.
-    height: float = 0.07749
-    # base_height = sim_Z of the connector tip from USD origin (-13.98 mm).
-    # Negative because the tip is BELOW the origin in sim_Z.
+    height: float = 0.08847
+    # base_height = sim_Z of the connector tip from USD origin (-3.00 mm).
     # Used in factory_utils.get_held_base_pos_local as held_base_z_offset.
-    base_height: float = -0.01398
+    base_height: float = -0.003
     mass: float = 0.01
     friction: float = 0.75
 
@@ -404,20 +399,24 @@ class ForgeRJ45Insert(ForgeTask):
     held_asset_cfg: RJ45MaleCfg = RJ45MaleCfg()
     # asset_size is informational; set to female socket width in mm.
     asset_size: float = 53.0
-    duration_s: float = 10.0
+    duration_s: float = 20.0
 
-    # --- Robot initial state (relative to socket opening) ---
-    hand_init_pos: list = [0.00, 0.00, 0.05]   # 50 mm above socket opening
+    # --- Robot initial state (TCP height above socket USD origin) ---
+    # Geometry: cavity entrance = socket_origin + 17 mm; TCP-to-tip offset = 64 mm.
+    # Formula: TCP_above_origin = tip_above_cavity + 0.017 + 0.064
+    # Near mode: tip 30 mm above cavity entrance → TCP = 0.030 + 0.081 = 0.111 m
+    hand_init_pos: list = [0.00, 0.00, 0.111]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0.0, 0.0]   # EE pointing down
     hand_init_orn_noise: list = [0.0, 0.0, 0.0]
 
     # --- Random initial pose ---
-    # Near mode: XY in socket-local frame, Z above socket opening (metres).
-    # yaw is aligned to socket yaw ± hand_init_yaw_noise_deg; no pitch noise.
+    # TCP Z range above socket USD origin (metres).
+    # tip_above_cavity = TCP_above_origin - 0.081
+    # [0.091, 0.231] → tip 10 mm to 150 mm above cavity entrance
     hand_init_x_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
     hand_init_y_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
-    hand_init_z_range: list = [0.015, 0.12]   # 15~120 mm above socket opening
+    hand_init_z_range: list = [0.091, 0.231]  # tip 10~150 mm above cavity entrance
     hand_init_yaw_noise_deg: float = 30.0      # ±30° from socket yaw (no pitch)
     hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
 
@@ -448,12 +447,11 @@ class ForgeRJ45Insert(ForgeTask):
     #   plug is XY-aligned (tip < 4 mm from opening centre) and correctly oriented
     #   (yaw < 20°, tilt < 15°), regardless of height above the socket.
     engage_threshold: float = 2.0
-    # success_threshold < 0 → "halfway insertion" check.
-    #   height_threshold = fixed_cfg.height * success_threshold = 0.02922 × (-0.24) ≈ -7 mm.
-    #   curr_success fires once the connector tip is ≥ 7 mm inside the socket opening
-    #   (z_disp < -0.007 m) AND XY is within 3 mm.
-    #   The male connector head is ~14 mm long, so -0.24 requires roughly half-insertion.
-    success_threshold: float = -0.24
+    # success_threshold < 0 → fires when tip is 2 mm below the full-insertion target.
+    #   target tip position: socket-local Z = +0.014 m (empirically calibrated).
+    #   height_threshold = 0.0 + (-0.002) = -0.002 m.
+    #   curr_success fires once tip reaches socket-local Z = 0.012 m AND XY < 3 mm.
+    success_threshold: float = 0.024
     # Two-phase keypoint strategy (mirrors box_lid_insert):
     #   Phase 1 (before first success): num_reset_kp Z-axis keypoints (X=Y=0).
     #     Pure Z spread gives a clear gradient for XY alignment and approach,
@@ -488,9 +486,9 @@ class ForgeRJ45Insert(ForgeTask):
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.001, rest_offset=0.0),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            # pos.z = base_height (0.02223 m) places the socket base flush with the
-            # table surface.  The USD origin is 22.23 mm above the socket base.
-            pos=(0.6, 0.0, 0.02223),
+            # pos.z = |Z_min| = 0.05145 m places socket bottom flush with table.
+            # USD origin is at the opening face (Z=0), bottom at Z=-0.05145 m.
+            pos=(0.6, 0.0, 0.05145),
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
@@ -594,7 +592,7 @@ class ForgeBNCSmallInsert(ForgeTask):
     fixed_asset_cfg: BNCSmallFemaleCfg = BNCSmallFemaleCfg()
     held_asset_cfg: BNCSmallMaleCfg = BNCSmallMaleCfg()
     asset_size: float = 44.0
-    duration_s: float = 10.0
+    duration_s: float = 20.0
 
     # --- Robot initial state (relative to socket opening) ---
     hand_init_pos: list = [0.00, 0.00, 0.05]

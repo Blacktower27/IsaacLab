@@ -20,8 +20,8 @@ Keyboard controls:
   G                — SUCCESS position: tip at success-threshold depth inside socket
 
 Coloured sphere markers (updated every frame):
-  BLUE   -- connector tip  (plug local [0,0,-13.98mm])
-  ORANGE -- socket opening centre  (socket local [0,0,+29.22mm])
+  BLUE   -- connector tip  (plug local [0,0,-3mm])
+  ORANGE -- socket opening centre  (socket local [0,0,0] = socket origin)
   GREEN  -- per-episode kp_rj45_local in plug frame  (keypoints_held)
   YELLOW -- per-episode kp_rj45_local in socket frame (keypoints_fixed)
   GREEN/YELLOW overlap -> keypoint_dist = 0 -> origins aligned
@@ -73,22 +73,29 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 
 # ---------------------------------------------------------------------------
-# RJ45 geometry constants (metres, post-STL->USD 0.001 scale, -90 Y rotation).
+# RJ45 geometry constants (metres, post-STL->USD 0.001 scale).
+# New STL geometry: both origins at mating interface.
+#   Female origin = opening face  → _OPENING_LOCAL = (0, 0, 0)
+#   Male origin   = connector mating face → physical tip is 3 mm below origin
 # ---------------------------------------------------------------------------
-_TIP_LOCAL      = (0.0, 0.0, -0.01398)   # connector tip in plug USD frame
-_OPENING_LOCAL  = (0.0, 0.0,  0.02922)   # socket opening centre in socket USD frame
+_TIP_LOCAL      = (0.0, 0.0, -0.003)   # connector tip in plug USD frame
+_OPENING_LOCAL  = (0.0, 0.0,  0.000)   # socket opening centre = socket USD origin
 
-# Z offset from socket origin to place plug origin at different positions:
-#   F (ENGAGE)  = tip 30 mm above socket opening
-#     plug_origin_z = socket_opening_z + 0.030 + 0.01398
-#                   = socket_origin_z  + 0.02922 + 0.030 + 0.01398 = socket_origin_z + 0.07320
-#   G (SUCCESS) = tip at success threshold depth = height * success_threshold = 0.02922 * (-0.24) = -0.007
-#     plug_origin_z = socket_opening_z - 0.007 + 0.01398
-#                   = socket_origin_z  + 0.02922 - 0.007 + 0.01398 = socket_origin_z + 0.03620
-#   R (ORIGINS) = origins coincide: plug_origin_z = socket_origin_z -> offset = 0
-_Z_OFFSET_ENGAGE  =  0.07320   # F key: 30mm above socket opening
-_Z_OFFSET_SUCCESS =  0.03620   # G key: at success threshold depth
-_Z_OFFSET_ORIGINS =  0.00000   # R key: plug origin = socket origin
+# Empirically calibrated: "full insertion" has plug origin at socket_local:
+#   Z = +17 mm  (true cavity entrance is 17 mm above socket USD origin)
+#   Y =  -6 mm  (cavity centre is 6 mm in -Y from socket USD origin)
+_XY_OFFSET_ORIGINS = (0.0, -0.006)
+
+# Z offset from socket origin to place plug origin at key positions:
+#   F (ENGAGE)  = tip 30 mm above cavity entrance (+17 mm)
+#     plug_origin_z = 0.017 + 0.030 + 0.003 = 0.050
+#   G (SUCCESS) = 2 mm below full-insertion target
+#     tip target = 0.017 - 0.003 = 0.014; success = 0.014 - 0.002 = 0.012
+#     plug_origin_z = 0.012 + 0.003 = 0.015
+#   R (ORIGINS) = empirical full insertion (plug origin 17 mm above socket origin)
+_Z_OFFSET_ENGAGE  =  0.050    # F key: tip 30 mm above cavity entrance
+_Z_OFFSET_SUCCESS =  0.015    # G key: tip 2 mm below full-insertion target
+_Z_OFFSET_ORIGINS =  0.017    # R key: visual full insertion (calibrated empirically)
 
 
 # ---------------------------------------------------------------------------
@@ -133,12 +140,12 @@ _pos_xy_offset = [0.0, 0.0]               # [x, y] additional offset
 _euler_offset  = [0.0, 0.0, 0.0]          # [roll, pitch, yaw]
 
 
-def _teleport(z_off: float, label: str):
+def _teleport(z_off: float, label: str, xy_off=(0.0, 0.0)):
     global _pos_z_offset, _pos_xy_offset, _euler_offset
     _pos_z_offset  = z_off
-    _pos_xy_offset = [0.0, 0.0]
+    _pos_xy_offset = [xy_off[0], xy_off[1]]
     _euler_offset  = [0.0, 0.0, 0.0]
-    print(f"[TELEPORT -> {label}]  plug_origin_z = socket_origin_z + {z_off*1000:.1f} mm")
+    print(f"[TELEPORT -> {label}]  plug_origin = socket_origin + X={xy_off[0]*1000:.1f} Y={xy_off[1]*1000:.1f} Z={z_off*1000:.1f} mm")
 
 
 def _poll_keys_and_move_plug(inner):
@@ -250,12 +257,22 @@ def _draw_markers(inner):
         torch.ones( num_envs, dtype=torch.int32, device=device),   # opening=1 (ORANGE)
     ]
 
-    # Per-episode body keypoints.
+    # Per-episode body keypoints — use held_base / target_held_base so they
+    # coincide at the calibrated full-insertion position (not raw USD origins).
     if hasattr(inner, "kp_rj45_local"):
+        from isaaclab_tasks.direct.factory import factory_utils
+        held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
+            held_pos, held_quat, inner.cfg_task.name,
+            inner.cfg_task.fixed_asset_cfg, num_envs, device,
+        )
+        target_base_pos, target_base_quat = factory_utils.get_target_held_base_pose(
+            fixed_pos, fixed_quat, inner.cfg_task.name,
+            inner.cfg_task.fixed_asset_cfg, num_envs, device,
+        )
         n_kp = inner.kp_rj45_local.shape[1]
         for i in range(n_kp):
-            _, kp_h = torch_utils.tf_combine(held_quat,  held_pos,  ident_q, inner.kp_rj45_local[:, i])
-            _, kp_t = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, inner.kp_rj45_local[:, i])
+            _, kp_h = torch_utils.tf_combine(held_base_quat,   held_base_pos,   ident_q, inner.kp_rj45_local[:, i])
+            _, kp_t = torch_utils.tf_combine(target_base_quat, target_base_pos, ident_q, inner.kp_rj45_local[:, i])
             translations_list.append(kp_h + env_orig)
             translations_list.append(kp_t + env_orig)
             marker_indices_list.append(torch.full((num_envs,), 2, dtype=torch.int32, device=device))  # GREEN
@@ -325,7 +342,7 @@ def _print_geometry(inner, step, successes, engaged):
         f"  origin -> origin: XY={orig_xy:.2f} mm  Z={orig_z:+.2f} mm\n"
         f"  mean kp_dist: {kp_dist_mm:.2f} mm\n"
         f"  ENGAGE: |XY|<5mm, Z<40mm, |yaw|<20 deg, tilt<15 deg  |  "
-        f"SUCCESS: Z<{inner.cfg_task.fixed_asset_cfg.height * inner.cfg_task.success_threshold * 1000:.1f} mm AND |XY|<3mm"
+        f"SUCCESS: Z<{(inner.cfg_task.fixed_asset_cfg.height + inner.cfg_task.success_threshold) * 1000:.1f} mm AND |XY|<3mm"
     )
 
 
@@ -379,11 +396,11 @@ def main():
 
             # Leading-edge teleports.
             if r_now and not _r_last:
-                _teleport(_Z_OFFSET_ORIGINS, "ORIGIN-COINCIDE (kp should overlap)")
+                _teleport(_Z_OFFSET_ORIGINS, "FULL-INSERT (calibrated)", _XY_OFFSET_ORIGINS)
             if f_now and not _f_last:
-                _teleport(_Z_OFFSET_ENGAGE,  "ENGAGE (tip 30 mm above opening)")
+                _teleport(_Z_OFFSET_ENGAGE,  "ENGAGE (tip 30 mm above cavity)", _XY_OFFSET_ORIGINS)
             if g_now and not _g_last:
-                _teleport(_Z_OFFSET_SUCCESS, "SUCCESS threshold depth")
+                _teleport(_Z_OFFSET_SUCCESS, "SUCCESS threshold depth", _XY_OFFSET_ORIGINS)
             _r_last, _f_last, _g_last = r_now, f_now, g_now
 
             actions = torch.zeros(env.action_space.shape, device=inner.device)
