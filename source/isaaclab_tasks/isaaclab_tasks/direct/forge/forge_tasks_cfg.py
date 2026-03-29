@@ -166,7 +166,7 @@ class ForgeBoxLidInsert(ForgeTask):
     # asset_size is informational only (used in some logging/metric paths in
     # upstream Factory code).  Set to the box's outer X dimension in mm.
     asset_size: float = 100.0
-    duration_s: float = 15.0
+    duration_s: float = 30.0
 
     # --- Robot initial state (relative to fixed-asset tip = box top face) ---
     # hand_init_pos[2] = 0.05 m: lid body bottom sits ~20 mm above box top,
@@ -198,7 +198,7 @@ class ForgeBoxLidInsert(ForgeTask):
     # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
     # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
     # "mixed" : near_init_prob fraction of envs start near, the rest far.
-    init_mode: str = "near"
+    init_mode: str = "far"
     near_init_prob: float = 0.5
 
     # --- Fixed asset (box) randomisation ---
@@ -399,7 +399,7 @@ class ForgeRJ45Insert(ForgeTask):
     held_asset_cfg: RJ45MaleCfg = RJ45MaleCfg()
     # asset_size is informational; set to female socket width in mm.
     asset_size: float = 53.0
-    duration_s: float = 20.0
+    duration_s: float = 30.0
 
     # --- Robot initial state (TCP height above socket USD origin) ---
     # Geometry: cavity entrance = socket_origin + 17 mm; TCP-to-tip offset = 64 mm.
@@ -416,7 +416,7 @@ class ForgeRJ45Insert(ForgeTask):
     # [0.091, 0.231] → tip 10 mm to 150 mm above cavity entrance
     hand_init_x_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
     hand_init_y_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
-    hand_init_z_range: list = [0.091, 0.231]  # tip 10~150 mm above cavity entrance
+    hand_init_z_range: list = [0.101, 0.181]  # tip 20~100 mm above cavity entrance
     hand_init_yaw_noise_deg: float = 30.0      # ±30° from socket yaw (no pitch)
     hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
 
@@ -424,7 +424,7 @@ class ForgeRJ45Insert(ForgeTask):
     # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
     # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
     # "mixed" : near_init_prob fraction of envs start near, the rest far.
-    init_mode: str = "near"
+    init_mode: str = "far"
     near_init_prob: float = 0.5
 
     # --- Fixed asset (socket) randomisation ---
@@ -592,7 +592,7 @@ class ForgeBNCSmallInsert(ForgeTask):
     fixed_asset_cfg: BNCSmallFemaleCfg = BNCSmallFemaleCfg()
     held_asset_cfg: BNCSmallMaleCfg = BNCSmallMaleCfg()
     asset_size: float = 44.0
-    duration_s: float = 20.0
+    duration_s: float = 30.0
 
     # --- Robot initial state (relative to socket opening) ---
     hand_init_pos: list = [0.00, 0.00, 0.07]
@@ -605,7 +605,7 @@ class ForgeBNCSmallInsert(ForgeTask):
     # yaw is aligned to socket yaw (or +180°) ± hand_init_yaw_noise_deg; no pitch noise.
     hand_init_x_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
     hand_init_y_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
-    hand_init_z_range: list = [0.015, 0.12]   # 15~120 mm above socket opening
+    hand_init_z_range: list = [0.07, 0.15]    # 70~150 mm above socket opening
     hand_init_yaw_noise_deg: float = 30.0      # ±30° from socket yaw (0° or 180° base)
     hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
 
@@ -613,7 +613,7 @@ class ForgeBNCSmallInsert(ForgeTask):
     # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
     # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
     # "mixed" : near_init_prob fraction of envs start near, the rest far.
-    init_mode: str = "near"
+    init_mode: str = "far"
     near_init_prob: float = 0.5
 
     # --- Fixed asset (socket) randomisation ---
