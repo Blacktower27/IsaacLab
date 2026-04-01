@@ -19,7 +19,7 @@ _KUKA_URDF = _os.path.normpath(
     _os.path.join(
         _os.path.dirname(_os.path.abspath(__file__)),
         "../../../../isaaclab_assets/isaaclab_assets/custom_assets/robots"
-        "/lbr_description/urdf/kuka_blue/kuka_blue.urdf",
+        "/lbr_description/urdf/kuka_blue/kuka_blue_lid.urdf",
     )
 )
 
@@ -119,7 +119,7 @@ class ForgeEnvCfg(FactoryEnvCfg):
         "fingertip_quat",
         "ee_linvel",
         "ee_angvel",
-        # "ft_force",
+        "ft_force",
         # "force_threshold",
     ]
     state_order: list = [
@@ -135,7 +135,7 @@ class ForgeEnvCfg(FactoryEnvCfg):
         "fixed_quat",
         "task_prop_gains",
         "ema_factor",
-        # "ft_force",
+        "ft_force",
         "pos_threshold",
         "rot_threshold",
         # "force_threshold",
@@ -178,7 +178,7 @@ class ForgeTaskNutThreadCfg(ForgeEnvCfg):
 class ForgeTaskBoxLidInsertCfg(ForgeEnvCfg):
     task_name = "box_lid_insert"
     task = ForgeBoxLidInsert()
-    episode_length_s = 15.0
+    episode_length_s = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ class ForgeKukaCtrlCfg(ForgeCtrlCfg):
     fingertip_body_name: str = "link_tcp"
     left_finger_body_name: str = "link_tcp"
     right_finger_body_name: str = "link_tcp"
-    force_sensor_body_name: str = "link_ee"
+    force_sensor_body_name: str = "force_sensor"
     # Lid is embedded in URDF as link_lid — skip separate held_asset.
     held_body_name: str = "link_lid"
     # Home pose: arm roughly above the workspace.
@@ -337,7 +337,7 @@ _KUKA_RJ45_URDF = _os.path.normpath(
 class ForgeTaskRJ45InsertCfg(ForgeEnvCfg):
     task_name = "rj45_insert"
     task = ForgeRJ45Insert()
-    episode_length_s = 20.0
+    episode_length_s = 30.0
 
 
 @configclass
@@ -444,7 +444,7 @@ _KUKA_BNC_SMALL_URDF = _os.path.normpath(
 class ForgeTaskBNCSmallInsertCfg(ForgeEnvCfg):
     task_name = "bnc_insert"
     task = ForgeBNCSmallInsert()
-    episode_length_s = 20.0
+    episode_length_s = 30.0
 
 
 @configclass

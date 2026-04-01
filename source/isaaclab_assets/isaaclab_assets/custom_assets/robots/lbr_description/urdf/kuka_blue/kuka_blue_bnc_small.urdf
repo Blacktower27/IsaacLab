@@ -394,10 +394,17 @@
       </geometry>
     </collision>
   </link>
+  <!-- Force sensor dummy link (zero-mass, co-located with link_ee flange). -->
+  <link name="force_sensor"/>
+  <joint name="joint_force_sensor" type="fixed">
+    <parent link="link_7"/>
+    <child link="force_sensor"/>
+    <origin rpy="0 0 3.14" xyz="0 0 0.192"/>
+  </joint>
   <joint name="joint_ee" type="fixed">
     <parent link="link_7"/>
     <child link="link_ee"/>
-    <origin rpy="0 0 3.14" xyz="0 0 0.035"/>
+    <origin rpy="0 0 0" xyz="0 0 0.035"/>
   </joint>
   <!-- TCP Link -->
   <link name="link_tcp"/>

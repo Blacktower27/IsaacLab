@@ -33,7 +33,9 @@ class ForgeEnv(FactoryEnv):
         self.flip_quats = torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
 
         # Force sensor information.
+        print(f"[ForgeEnv] robot body_names: {self._robot.body_names}")
         self.force_sensor_body_idx = self._robot.body_names.index(self.cfg.ctrl.force_sensor_body_name)
+        print(f"[ForgeEnv] force_sensor_body_name='{self.cfg.ctrl.force_sensor_body_name}'  idx={self.force_sensor_body_idx}")
         self.force_sensor_smooth = torch.zeros((self.num_envs, 6), device=self.device)
         self.force_sensor_world_smooth = torch.zeros((self.num_envs, 6), device=self.device)
 
