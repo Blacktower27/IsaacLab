@@ -7,7 +7,7 @@
 # Omniverse
 **/*.dmp
 **/.thumbs
-
+**/*.pth
 # No USD files allowed in the repo
 **/*.usd
 **/*.usda
@@ -56,6 +56,7 @@ _build
 # RL-Games
 **/runs/*
 **/logs/*
+**/carc_logs/*
 **/recordings/*
 
 # Pre-Trained Checkpoints

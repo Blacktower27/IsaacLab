@@ -421,11 +421,40 @@ class ForgeRJ45Insert(ForgeTask):
     hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
 
     # --- Init mode ---
-    # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
-    # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
-    # "mixed" : near_init_prob fraction of envs start near, the rest far.
+    # "near"    : fixed position directly above socket (hand_init_pos, deterministic).
+    # "far"     : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
+    # "mixed"   : near_init_prob fraction of envs start near, the rest far.
+    # "contact" : Kuka RJ45 only. Sample RPY in the female frame, then align a
+    #             random point on the male bottom patch to a random point on the
+    #             female rear edge.
     init_mode: str = "far"
     near_init_prob: float = 0.5
+    # Female rear-edge guide for contact-init debugging, expressed in the
+    # FEMALE local frame. The visualizer draws a line segment at:
+    #   x in female_rear_edge_x_range_local
+    #   y = female_rear_edge_y_local
+    #   z = female_rear_edge_z_local
+    # Tweak these values by hand until the line sits on the rear outer lip you
+    # actually want to use for contact initialization.
+    female_rear_edge_x_range_local: list = [-0.020, 0.020]
+    female_rear_edge_y_local: float = -0.0186
+    female_rear_edge_z_local: float = 0.0
+    # Male bottom patch for contact-init debugging, expressed in the MALE local
+    # frame. The visualizer draws a rectangular point patch at:
+    #   x in male_bottom_patch_x_range_local
+    #   y in male_bottom_patch_y_range_local
+    #   z = male_bottom_patch_z_local
+    # Tweak these values by hand until the patch covers the bottom region you
+    # actually want to sample contact points from.
+    male_bottom_patch_x_range_local: list = [-0.018, 0.018]
+    male_bottom_patch_y_range_local: list = [-0.006, 0.009]
+    male_bottom_patch_z_local: float = -0.06
+    # Contact-init orientation ranges (degrees), relative to the female frame.
+    # These are kept in the task cfg so the eventual reset sampler can use them
+    # directly without hard-coded geometry logic in factory_utils.
+    contact_init_roll_range_deg: list = [-10.0, 10.0]
+    contact_init_pitch_range_deg: list = [-10.0, 10.0]
+    contact_init_yaw_range_deg: list = [-20.0, 20.0]
 
     # --- Fixed asset (socket) randomisation ---
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]

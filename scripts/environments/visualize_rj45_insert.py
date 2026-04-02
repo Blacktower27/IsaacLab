@@ -14,6 +14,7 @@ Keyboard controls:
   J / L            — yaw   +/-
   U / O            — roll  +/-
   Hold Shift       — 5x speed
+  C                — CONTACT init: random r/p/y + random male/female contact points
   R                — ORIGIN-COINCIDE: place plug origin at socket origin
                      (keypoints should overlap if origins coincide at success)
   F                — ENGAGE position: tip 30 mm above socket opening, aligned
@@ -24,6 +25,8 @@ Coloured sphere markers (updated every frame):
   ORANGE -- socket opening centre  (socket local [0,0,0] = socket origin)
   GREEN  -- per-episode kp_rj45_local in plug frame  (keypoints_held)
   YELLOW -- per-episode kp_rj45_local in socket frame (keypoints_fixed)
+  WHITE  -- adjustable female rear-edge guide (female local frame)
+  CYAN   -- adjustable male bottom patch (male local frame)
   GREEN/YELLOW overlap -> keypoint_dist = 0 -> origins aligned
 
 Usage
@@ -138,6 +141,9 @@ def _key(k) -> bool:
 _pos_z_offset: float = _Z_OFFSET_ENGAGE   # initial position: engage zone
 _pos_xy_offset = [0.0, 0.0]               # [x, y] additional offset
 _euler_offset  = [0.0, 0.0, 0.0]          # [roll, pitch, yaw]
+_BOTTOM_PATCH_X_SAMPLES = 5
+_BOTTOM_PATCH_Y_SAMPLES = 4
+_REAR_EDGE_MARKER_SAMPLES = 11
 
 
 def _teleport(z_off: float, label: str, xy_off=(0.0, 0.0)):
@@ -146,6 +152,57 @@ def _teleport(z_off: float, label: str, xy_off=(0.0, 0.0)):
     _pos_xy_offset = [xy_off[0], xy_off[1]]
     _euler_offset  = [0.0, 0.0, 0.0]
     print(f"[TELEPORT -> {label}]  plug_origin = socket_origin + X={xy_off[0]*1000:.1f} Y={xy_off[1]*1000:.1f} Z={z_off*1000:.1f} mm")
+
+
+def _teleport_contact(inner):
+    global _pos_z_offset, _pos_xy_offset, _euler_offset
+
+    device = inner.device
+    num_envs = inner.num_envs
+    socket_pos_w = inner._fixed_asset.data.root_pos_w.clone()
+    socket_quat_w = inner._fixed_asset.data.root_quat_w.clone()
+    ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(num_envs, -1)
+
+    roll = math.radians(float(torch.empty(1).uniform_(*inner.cfg_task.contact_init_roll_range_deg).item()))
+    pitch = math.radians(float(torch.empty(1).uniform_(*inner.cfg_task.contact_init_pitch_range_deg).item()))
+    yaw = math.radians(float(torch.empty(1).uniform_(*inner.cfg_task.contact_init_yaw_range_deg).item()))
+    _euler_offset = [roll, pitch, yaw]
+    delta_q = quat_from_euler_xyz(
+        torch.tensor([roll], device=device),
+        torch.tensor([pitch], device=device),
+        torch.tensor([yaw], device=device),
+    ).expand(num_envs, -1)
+    plug_quat_w = quat_mul(socket_quat_w, delta_q)
+
+    female_point_local = torch.zeros((num_envs, 3), device=device)
+    female_point_local[:, 0] = float(torch.empty(1).uniform_(*inner.cfg_task.female_rear_edge_x_range_local).item())
+    female_point_local[:, 1] = float(inner.cfg_task.female_rear_edge_y_local)
+    female_point_local[:, 2] = float(inner.cfg_task.female_rear_edge_z_local)
+    _, female_point_w = torch_utils.tf_combine(socket_quat_w, socket_pos_w, ident_q, female_point_local)
+
+    male_point_local = torch.zeros((num_envs, 3), device=device)
+    male_point_local[:, 0] = float(torch.empty(1).uniform_(*inner.cfg_task.male_bottom_patch_x_range_local).item())
+    male_point_local[:, 1] = float(torch.empty(1).uniform_(*inner.cfg_task.male_bottom_patch_y_range_local).item())
+    male_point_local[:, 2] = float(inner.cfg_task.male_bottom_patch_z_local)
+
+    male_point_offset_w = torch_utils.quat_rotate(plug_quat_w, male_point_local)
+    plug_pos_w = female_point_w - male_point_offset_w
+    offset_w = plug_pos_w[0] - socket_pos_w[0]
+
+    _pos_xy_offset = [offset_w[0].item(), offset_w[1].item()]
+    _pos_z_offset = offset_w[2].item()
+
+    eul_deg = [math.degrees(v) for v in _euler_offset]
+    female_dbg = female_point_local[0].tolist()
+    male_dbg = male_point_local[0].tolist()
+    print(
+        "[TELEPORT -> CONTACT init]  "
+        f"plug_origin = socket_origin + X={_pos_xy_offset[0]*1000:.1f} "
+        f"Y={_pos_xy_offset[1]*1000:.1f} Z={_pos_z_offset*1000:.1f} mm  "
+        f"rpy=[{eul_deg[0]:+.1f}, {eul_deg[1]:+.1f}, {eul_deg[2]:+.1f}] deg  "
+        f"female_local=[{female_dbg[0]*1000:+.1f}, {female_dbg[1]*1000:+.1f}, {female_dbg[2]*1000:+.1f}] mm  "
+        f"male_local=[{male_dbg[0]*1000:+.1f}, {male_dbg[1]*1000:+.1f}, {male_dbg[2]*1000:+.1f}] mm"
+    )
 
 
 def _poll_keys_and_move_plug(inner):
@@ -225,6 +282,14 @@ def _get_markers() -> VisualizationMarkers:
                     radius=0.003,
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.8, 0.0)),
                 ),
+                "rear_edge": sim_utils.SphereCfg(  # adjustable female rear-edge guide — WHITE
+                    radius=0.0024,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 1.0)),
+                ),
+                "bottom_patch": sim_utils.SphereCfg(  # adjustable male bottom patch — CYAN
+                    radius=0.0026,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.95, 0.95)),
+                ),
             },
         )
         _markers = VisualizationMarkers(cfg)
@@ -277,6 +342,35 @@ def _draw_markers(inner):
             translations_list.append(kp_t + env_orig)
             marker_indices_list.append(torch.full((num_envs,), 2, dtype=torch.int32, device=device))  # GREEN
             marker_indices_list.append(torch.full((num_envs,), 3, dtype=torch.int32, device=device))  # YELLOW
+
+    # Adjustable female rear-edge guide, defined directly in the female local frame.
+    x_lo, x_hi = inner.cfg_task.female_rear_edge_x_range_local
+    rear_edge_local = torch.zeros((_REAR_EDGE_MARKER_SAMPLES, 3), device=device)
+    rear_edge_local[:, 0] = torch.linspace(float(x_lo), float(x_hi), _REAR_EDGE_MARKER_SAMPLES, device=device)
+    rear_edge_local[:, 1] = float(inner.cfg_task.female_rear_edge_y_local)
+    rear_edge_local[:, 2] = float(inner.cfg_task.female_rear_edge_z_local)
+    for i in range(_REAR_EDGE_MARKER_SAMPLES):
+        _, rear_edge_env = torch_utils.tf_combine(
+            fixed_quat, fixed_pos, ident_q, rear_edge_local[i].unsqueeze(0).expand(num_envs, -1)
+        )
+        translations_list.append(rear_edge_env + env_orig)
+        marker_indices_list.append(torch.full((num_envs,), 4, dtype=torch.int32, device=device))  # WHITE
+
+    # Adjustable male bottom patch, defined directly in the male local frame.
+    x_lo, x_hi = inner.cfg_task.male_bottom_patch_x_range_local
+    y_lo, y_hi = inner.cfg_task.male_bottom_patch_y_range_local
+    patch_x = torch.linspace(float(x_lo), float(x_hi), _BOTTOM_PATCH_X_SAMPLES, device=device)
+    patch_y = torch.linspace(float(y_lo), float(y_hi), _BOTTOM_PATCH_Y_SAMPLES, device=device)
+    patch_xy = torch.cartesian_prod(patch_x, patch_y)
+    bottom_patch_local = torch.zeros((patch_xy.shape[0], 3), device=device)
+    bottom_patch_local[:, 0:2] = patch_xy
+    bottom_patch_local[:, 2] = float(inner.cfg_task.male_bottom_patch_z_local)
+    for i in range(bottom_patch_local.shape[0]):
+        _, bottom_patch_env = torch_utils.tf_combine(
+            held_quat, held_pos, ident_q, bottom_patch_local[i].unsqueeze(0).expand(num_envs, -1)
+        )
+        translations_list.append(bottom_patch_env + env_orig)
+        marker_indices_list.append(torch.full((num_envs,), 5, dtype=torch.int32, device=device))  # CYAN
 
     translations   = torch.cat(translations_list,   dim=0)
     marker_indices = torch.cat(marker_indices_list, dim=0)
@@ -373,8 +467,15 @@ def main():
     print(
         f"\n[ENV] {env_id}\n"
         "[CONTROLS]  Arrow=XY  Q/E=Z  I/K=pitch  J/L=yaw  U/O=roll  Shift=5x\n"
-        "[TELEPORT]  R=origin-coincide  F=engage  G=success\n"
-        "[MARKERS]   BLUE=tip  ORANGE=opening  GREEN=kp_held  YELLOW=kp_socket\n"
+        "[TELEPORT]  C=contact-init  R=origin-coincide  F=engage  G=success\n"
+        "[MARKERS]   BLUE=tip  ORANGE=opening  GREEN=kp_held  YELLOW=kp_socket  WHITE=rear-edge  CYAN=bottom-patch\n"
+        f"[REAR EDGE] female local frame: x={tuple(env_cfg.task.female_rear_edge_x_range_local)}  "
+        f"y={env_cfg.task.female_rear_edge_y_local:+.4f}  z={env_cfg.task.female_rear_edge_z_local:+.4f}\n"
+        f"[BOTTOM PATCH] male local frame: x={tuple(env_cfg.task.male_bottom_patch_x_range_local)}  "
+        f"y={tuple(env_cfg.task.male_bottom_patch_y_range_local)}  z={env_cfg.task.male_bottom_patch_z_local:+.4f}\n"
+        f"[CONTACT RPY] roll={tuple(env_cfg.task.contact_init_roll_range_deg)}  "
+        f"pitch={tuple(env_cfg.task.contact_init_pitch_range_deg)}  "
+        f"yaw={tuple(env_cfg.task.contact_init_yaw_range_deg)}\n"
         "  GREEN+YELLOW overlap -> kp_dist=0 -> origins aligned (R position)\n"
     )
 
@@ -386,22 +487,25 @@ def main():
     _frozen_joint_vel = torch.zeros_like(_frozen_joint_pos)
 
     step = 0
-    _r_last = _f_last = _g_last = False
+    _c_last = _r_last = _f_last = _g_last = False
 
     while simulation_app.is_running():
         with torch.inference_mode():
+            c_now = _key(Ki.C)
             r_now = _key(Ki.R)
             f_now = _key(Ki.F)
             g_now = _key(Ki.G)
 
             # Leading-edge teleports.
+            if c_now and not _c_last:
+                _teleport_contact(inner)
             if r_now and not _r_last:
                 _teleport(_Z_OFFSET_ORIGINS, "FULL-INSERT (calibrated)", _XY_OFFSET_ORIGINS)
             if f_now and not _f_last:
                 _teleport(_Z_OFFSET_ENGAGE,  "ENGAGE (tip 30 mm above cavity)", _XY_OFFSET_ORIGINS)
             if g_now and not _g_last:
                 _teleport(_Z_OFFSET_SUCCESS, "SUCCESS threshold depth", _XY_OFFSET_ORIGINS)
-            _r_last, _f_last, _g_last = r_now, f_now, g_now
+            _c_last, _r_last, _f_last, _g_last = c_now, r_now, f_now, g_now
 
             actions = torch.zeros(env.action_space.shape, device=inner.device)
             _, _, done, trunc, _ = env.step(actions)

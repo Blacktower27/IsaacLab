@@ -46,7 +46,6 @@ def get_rj45_tip_keypoint_offsets(device):
         device=device,
     )
 
-
 def get_deriv_gains(prop_gains, rot_deriv_scale=1.0):
     """Set robot gains using critical damping."""
     deriv_gains = 2 * torch.sqrt(prop_gains)
