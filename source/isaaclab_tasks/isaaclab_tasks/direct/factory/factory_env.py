@@ -8,6 +8,7 @@ import torch
 
 import carb
 import isaacsim.core.utils.torch as torch_utils
+from pxr import UsdPhysics
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
@@ -142,7 +143,9 @@ class FactoryEnv(DirectRLEnv):
             self._small_gear_asset = Articulation(self.cfg_task.small_gear_cfg)
             self._large_gear_asset = Articulation(self.cfg_task.large_gear_cfg)
 
-        self.scene.clone_environments(copy_from_source=False)
+        self._apply_robot_articulation_props_on_source_env()
+
+        self.scene.clone_environments(copy_from_source=True)
         if self.device == "cpu":
             # we need to explicitly filter collisions for CPU simulation
             self.scene.filter_collisions()
@@ -161,6 +164,31 @@ class FactoryEnv(DirectRLEnv):
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _apply_robot_articulation_props_on_source_env(self):
+        """Apply robot articulation properties on the actual source articulation root.
+
+        Some custom robot USDs place the articulation root on a child prim
+        (for example ``/Robot/link_0``) rather than on ``/Robot``. Since the
+        scene clones ``env_0`` after spawning, we need to patch the source env's
+        real articulation root before cloning so every cloned environment inherits
+        the correct fixed-base articulation setup.
+        """
+        spawn_cfg = self.cfg.robot.spawn
+        if spawn_cfg is None or spawn_cfg.articulation_props is None:
+            return
+
+        source_robot_path = self.cfg.robot.prim_path.replace(".*", "0")
+        articulation_root_prims = sim_utils.get_all_matching_child_prims(
+            source_robot_path,
+            predicate=lambda prim: prim.HasAPI(UsdPhysics.ArticulationRootAPI),
+            traverse_instance_prims=False,
+        )
+        if len(articulation_root_prims) != 1:
+            return
+
+        articulation_root_path = articulation_root_prims[0].GetPath().pathString
+        sim_utils.modify_articulation_root_properties(articulation_root_path, spawn_cfg.articulation_props)
 
     def _compute_intermediate_values(self, dt):
         """Get values computed from raw tensors. This includes adding noise."""

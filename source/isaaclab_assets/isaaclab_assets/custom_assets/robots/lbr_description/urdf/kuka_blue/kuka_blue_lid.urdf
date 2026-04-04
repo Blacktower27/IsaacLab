@@ -2,12 +2,6 @@
 <!-- Kuka iiwa7 + Lid_Yellow held object (box-lid insertion task).
      Base robot: kuka_blue.urdf  |  Task object: Lid_Yellow fixed to link_tcp. -->
 <robot name="iiwa7">
-  <link name="world"/>
-  <joint name="world_joint" type="fixed">
-    <parent link="world"/>
-    <child link="link_0"/>
-    <origin rpy="0.0 0.0 0.0" xyz="0.0 0.0 0.0"/>
-  </joint>
   <!-- ros_control-plugin -->
 
   <ros2_control name="lbr_system_interface" type="system">
@@ -376,7 +370,27 @@
     <origin rpy="0 0 0" xyz="0 0 0.035"/>
   </joint>
   <!-- TCP frame -->
-  <link name="link_tcp"/>
+  <link name="link_tcp">
+    <!-- Visual-only TCP marker: sphere marks the exact frame origin; cylinder shows local +Z. -->
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <sphere radius="0.012"/>
+      </geometry>
+      <material name="tcp_marker_yellow">
+        <color rgba="1 0.85 0.1 1"/>
+      </material>
+    </visual>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0.02"/>
+      <geometry>
+        <cylinder length="0.04" radius="0.0025"/>
+      </geometry>
+      <material name="tcp_marker_cyan">
+        <color rgba="0.1 0.9 1 1"/>
+      </material>
+    </visual>
+  </link>
   <joint name="joint_tcp" type="fixed">
     <parent link="link_ee"/>
     <child link="link_tcp"/>

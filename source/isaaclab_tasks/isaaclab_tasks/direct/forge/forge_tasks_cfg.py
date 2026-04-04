@@ -427,7 +427,7 @@ class ForgeRJ45Insert(ForgeTask):
     # "contact" : Kuka RJ45 only. Sample RPY in the female frame, then align a
     #             random point on the male bottom patch to a random point on the
     #             female rear edge.
-    init_mode: str = "far"
+    init_mode: str = "near"
     near_init_prob: float = 0.5
     # Female rear-edge guide for contact-init debugging, expressed in the
     # FEMALE local frame. The visualizer draws a line segment at:
@@ -452,8 +452,8 @@ class ForgeRJ45Insert(ForgeTask):
     # Contact-init orientation ranges (degrees), relative to the female frame.
     # These are kept in the task cfg so the eventual reset sampler can use them
     # directly without hard-coded geometry logic in factory_utils.
-    contact_init_roll_range_deg: list = [-10.0, 10.0]
-    contact_init_pitch_range_deg: list = [-10.0, 10.0]
+    contact_init_roll_range_deg: list = [0.0, 0.0]
+    contact_init_pitch_range_deg: list = [0.0, 0.0]
     contact_init_yaw_range_deg: list = [-20.0, 20.0]
 
     # --- Fixed asset (socket) randomisation ---

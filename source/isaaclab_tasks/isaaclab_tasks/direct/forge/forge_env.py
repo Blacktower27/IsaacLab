@@ -122,6 +122,8 @@ class ForgeEnv(FactoryEnv):
         noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
         prev_actions = self.actions.clone()
         prev_actions[:, 3] = 0.0
+        if self.cfg_task.name in ("rj45_insert", "bnc_insert"):
+            prev_actions[:, 4] = 0.0
 
         obs_dict.update(
             {
@@ -165,9 +167,9 @@ class ForgeEnv(FactoryEnv):
         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
         ctrl_target_fingertip_preclipped_pos = fixed_pos_action_frame + pos_actions
         # (1.b) Enforce rotation action constraints.
-        rot_actions[:, 0] = 0.0  # roll always zero
+        rot_actions[:, 0] = 0.0
         if self.cfg_task.name in ("rj45_insert", "bnc_insert"):
-            rot_actions[:, 1] = 0.0  # pitch zero: plug insertion is pure axial + yaw
+            rot_actions[:, 1] = 0.0
 
         # Assumes joint limit is in (+x, -y)-quadrant of world frame.
         rot_actions[:, 2] = np.deg2rad(-180.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0  # Joint limit.
@@ -285,14 +287,14 @@ class ForgeEnv(FactoryEnv):
         pos_actions = pos_actions @ torch.diag(1.0 / pos_action_bounds)
         self.actions[:, 0:3] = self.prev_actions[:, 0:3] = pos_actions
 
-        # Relative yaw to bolt.
+        # Relative orientation to the bolt frame.
         unrot_180_euler = torch.tensor([-np.pi, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         unrot_quat = torch_utils.quat_from_euler_xyz(
             roll=unrot_180_euler[:, 0], pitch=unrot_180_euler[:, 1], yaw=unrot_180_euler[:, 2]
         )
 
         fingertip_quat_rel_bolt = torch_utils.quat_mul(unrot_quat, self.fingertip_midpoint_quat)
-        fingertip_yaw_bolt = torch_utils.get_euler_xyz(fingertip_quat_rel_bolt)[-1]
+        _, _, fingertip_yaw_bolt = torch_utils.get_euler_xyz(fingertip_quat_rel_bolt)
         fingertip_yaw_bolt = torch.where(
             fingertip_yaw_bolt > torch.pi / 2, fingertip_yaw_bolt - 2 * torch.pi, fingertip_yaw_bolt
         )

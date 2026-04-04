@@ -15,11 +15,11 @@ from isaaclab.utils import configclass
 
 from isaaclab_tasks.direct.factory.factory_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, CtrlCfg, FactoryEnvCfg, ObsRandCfg
 
-_KUKA_URDF = _os.path.normpath(
+_KUKA_USD = _os.path.normpath(
     _os.path.join(
         _os.path.dirname(_os.path.abspath(__file__)),
         "../../../../isaaclab_assets/isaaclab_assets/custom_assets/robots"
-        "/lbr_description/urdf/kuka_blue/kuka_blue_lid.urdf",
+        "/lbr_description/usd/kuka_blue_lid/kuka_blue_lid.usd",
     )
 )
 
@@ -119,7 +119,7 @@ class ForgeEnvCfg(FactoryEnvCfg):
         "fingertip_quat",
         "ee_linvel",
         "ee_angvel",
-        # "ft_force",
+        "ft_force",
         # "force_threshold",
     ]
     state_order: list = [
@@ -135,7 +135,7 @@ class ForgeEnvCfg(FactoryEnvCfg):
         "fixed_quat",
         "task_prop_gains",
         "ema_factor",
-        # "ft_force",
+        "ft_force",
         "pos_threshold",
         "rot_threshold",
         # "force_threshold",
@@ -253,14 +253,8 @@ class ForgeKukaBoxLidInsertCfg(ForgeTaskBoxLidInsertCfg):
 
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
-        spawn=sim_utils.UrdfFileCfg(
-            asset_path=_KUKA_URDF,
-            fix_base=True,               # Lock the base link to the world frame.
-            merge_fixed_joints=False,    # Keep all fixed joints as separate bodies (preserves link_ee, link_tcp).
-            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-                # Disable default PD gains from URDF — OSC controller outputs pure torques instead.
-                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
-            ),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=_KUKA_USD,
             activate_contact_sensors=True,  # Enable contact sensors to read contact forces.
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=True,               # Disable gravity on all links; the OSC controller compensates for it.
@@ -278,6 +272,7 @@ class ForgeKukaBoxLidInsertCfg(ForgeTaskBoxLidInsertCfg):
                 enabled_self_collisions=False,       # Disable self-collision detection for performance.
                 solver_position_iteration_count=192, # Articulation-level position solver iterations.
                 solver_velocity_iteration_count=1,
+                fix_root_link=True,                  # Fix base in PhysX on the actual articulation root before env cloning.
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.005,  # Distance (m) at which contact is detected before actual touch.
@@ -324,11 +319,11 @@ class ForgeKukaBoxLidInsertCfg(ForgeTaskBoxLidInsertCfg):
 #   Isaac-Forge-RJ45Insert-Kuka-Direct-v0
 # ---------------------------------------------------------------------------
 
-_KUKA_RJ45_URDF = _os.path.normpath(
+_KUKA_RJ45_USD = _os.path.normpath(
     _os.path.join(
         _os.path.dirname(_os.path.abspath(__file__)),
         "../../../../isaaclab_assets/isaaclab_assets/custom_assets/robots"
-        "/lbr_description/urdf/kuka_blue/kuka_blue_rj45.urdf",
+        "/lbr_description/usd/kuka_blue_rj45/kuka_blue_rj45.usd",
     )
 )
 
@@ -362,13 +357,8 @@ class ForgeKukaRJ45InsertCfg(ForgeTaskRJ45InsertCfg):
 
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
-        spawn=sim_utils.UrdfFileCfg(
-            asset_path=_KUKA_RJ45_URDF,
-            fix_base=True,
-            merge_fixed_joints=False,
-            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
-            ),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=_KUKA_RJ45_USD,
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=True,
@@ -386,6 +376,7 @@ class ForgeKukaRJ45InsertCfg(ForgeTaskRJ45InsertCfg):
                 enabled_self_collisions=False,
                 solver_position_iteration_count=192,
                 solver_velocity_iteration_count=1,
+                fix_root_link=True,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.005,
@@ -431,11 +422,11 @@ class ForgeKukaRJ45InsertCfg(ForgeTaskRJ45InsertCfg):
 #   Isaac-Forge-BNCSmallInsert-Kuka-Direct-v0
 # ---------------------------------------------------------------------------
 
-_KUKA_BNC_SMALL_URDF = _os.path.normpath(
+_KUKA_BNC_SMALL_USD = _os.path.normpath(
     _os.path.join(
         _os.path.dirname(_os.path.abspath(__file__)),
         "../../../../isaaclab_assets/isaaclab_assets/custom_assets/robots"
-        "/lbr_description/urdf/kuka_blue/kuka_blue_bnc_small.urdf",
+        "/lbr_description/usd/kuka_blue_bnc_small/kuka_blue_bnc_small.usd",
     )
 )
 
@@ -468,13 +459,8 @@ class ForgeKukaBNCSmallInsertCfg(ForgeTaskBNCSmallInsertCfg):
 
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
-        spawn=sim_utils.UrdfFileCfg(
-            asset_path=_KUKA_BNC_SMALL_URDF,
-            fix_base=True,
-            merge_fixed_joints=False,
-            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
-            ),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=_KUKA_BNC_SMALL_USD,
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=True,
@@ -492,6 +478,7 @@ class ForgeKukaBNCSmallInsertCfg(ForgeTaskBNCSmallInsertCfg):
                 enabled_self_collisions=False,
                 solver_position_iteration_count=192,
                 solver_velocity_iteration_count=1,
+                fix_root_link=True,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.005,
