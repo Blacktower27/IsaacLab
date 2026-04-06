@@ -132,7 +132,7 @@ def get_held_base_pose(held_pos, held_quat, task_name, fixed_asset_cfg, num_envs
     return held_base_pos, held_base_quat
 
 
-def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg, num_envs, device):
+def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg, num_envs, device, task_cfg=None):
     """Get target poses for keypoint and success computation."""
     fixed_success_pos_local = torch.zeros((num_envs, 3), device=device)
     if task_name == "peg_insert":
@@ -163,20 +163,15 @@ def get_target_held_base_pose(fixed_pos, fixed_quat, task_name, fixed_asset_cfg,
         _LID_BASE_HEIGHT = 0.0188  # must match LidYellowCfg.base_height
         fixed_success_pos_local[:, 2] = _LID_BASE_HEIGHT
     elif task_name == "rj45_insert":
-        # [CUSTOM] RJ45 insertion geometry (empirically calibrated, values in metres):
-        #
-        # Empirical finding: "full insertion" has plug origin at socket-local:
-        #   Y = -0.006 m  (cavity centre is 6 mm in -Y from socket USD origin)
-        #   Z = +0.017 m  (cavity entrance is 17 mm above socket USD origin)
-        #
-        # held_base tracks the connector TIP (3 mm below plug origin, held_base_z_offset=-0.003).
-        # At full insertion: tip is at socket-local Y=-0.006 m, Z = 0.017 - 0.003 = +0.014 m.
-        #
-        # NOTE: keypoint reward for rj45_insert does NOT use this target — it uses
-        # per-episode random body keypoints sampled at reset (see _reset_idx / _get_factory_rew_dict).
-        # This value drives success detection and visualisation.
-        fixed_success_pos_local[:, 1] = -0.006   # cavity centre Y offset
-        fixed_success_pos_local[:, 2] =  0.014   # tip Z at full insertion
+        # [CUSTOM] RJ45 insertion geometry: read from task_cfg (single source of truth).
+        # task_cfg.socket_target_y_local = cavity centre Y offset from socket USD origin.
+        # task_cfg.socket_target_z_local = tip Z at full insertion in socket local frame.
+        if task_cfg is not None:
+            fixed_success_pos_local[:, 1] = task_cfg.socket_target_y_local
+            fixed_success_pos_local[:, 2] = task_cfg.socket_target_z_local
+        else:
+            fixed_success_pos_local[:, 1] = -0.006
+            fixed_success_pos_local[:, 2] =  0.014
     elif task_name == "bnc_insert":
         # [CUSTOM] BNC Small insertion geometry (values in metres, scale ×0.001):
         #

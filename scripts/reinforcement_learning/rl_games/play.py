@@ -49,6 +49,15 @@ parser.add_argument(
     default=0,
     help="Environment index to record (default: 0).",
 )
+parser.add_argument(
+    "--max_completed_episodes",
+    type=int,
+    default=None,
+    help=(
+        "If set, stop play after this many completed vector-env episodes (sum across all envs). "
+        "Useful for headless batch evaluation. Default: run until the app is closed."
+    ),
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -378,6 +387,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
 
+        if args_cli.max_completed_episodes is not None and total_episodes >= args_cli.max_completed_episodes:
+            rate = (total_successes / total_episodes) if total_episodes > 0 else 0.0
+            print(
+                f"[EVAL] STOP max_completed_episodes={args_cli.max_completed_episodes}  "
+                f"episodes={total_episodes}  successes={int(total_successes)}  success_rate={rate:.2%}"
+            )
+            break
+
     # close CSV file if recording
     if csv_file is not None:
         csv_file.close()
@@ -391,4 +408,10 @@ if __name__ == "__main__":
     # run the main function
     main()
     # close sim app
-    simulation_app.close()
+    try:
+        simulation_app.close()
+    except Exception:
+        pass
+    if args_cli.max_completed_episodes is not None:
+        import os
+        os._exit(0)

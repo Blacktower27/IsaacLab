@@ -55,7 +55,7 @@ import gymnasium as gym
 import isaacsim.core.utils.torch as torch_utils
 import isaaclab.sim as sim_utils
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.utils.math import quat_apply_inverse, quat_from_euler_xyz, quat_mul
+from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse, quat_conjugate, quat_from_euler_xyz, quat_mul
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
@@ -361,6 +361,20 @@ def _print_success_info(inner, step, successes: torch.Tensor, engaged: torch.Ten
         f"  left  clip pos: {_fmt_pos(lc0)}  →  dist-to-hole: {_fmt_dist(dl, dl_norm)}\n"
         f"  right clip pos: {_fmt_pos(rc0)}  →  dist-to-hole: {_fmt_dist(dr, dr_norm)}\n"
         f"  (hole targets — left: X=-25.2 Y=-44.4 Z=+25.0 mm | right: X=+24.3 Y=-44.4 Z=+25.0 mm)"
+    )
+
+    # --- ORIENTATION CHECK ---
+    fixed_r, fixed_p, fixed_y = euler_xyz_from_quat(fixed_quat[0:1])
+    held_r,  held_p,  held_y  = euler_xyz_from_quat(held_quat[0:1])
+    rel_quat = quat_mul(quat_conjugate(fixed_quat[0:1]), held_quat[0:1])
+    rel_r, rel_p, rel_y = euler_xyz_from_quat(rel_quat)
+    rq = rel_quat[0].cpu()
+    print(
+        f"  --- ORIENTATION CHECK ---\n"
+        f"  fixed  RPY: [{math.degrees(fixed_r.item()):+7.2f}, {math.degrees(fixed_p.item()):+7.2f}, {math.degrees(fixed_y.item()):+7.2f}] deg\n"
+        f"  held   RPY: [{math.degrees(held_r.item()):+7.2f}, {math.degrees(held_p.item()):+7.2f}, {math.degrees(held_y.item()):+7.2f}] deg\n"
+        f"  rel    RPY: [{math.degrees(rel_r.item()):+7.2f}, {math.degrees(rel_p.item()):+7.2f}, {math.degrees(rel_y.item()):+7.2f}] deg  <- should be [0,0,0]\n"
+        f"  rel   quat: [{rq[0]:.4f}, {rq[1]:.4f}, {rq[2]:.4f}, {rq[3]:.4f}]  (wxyz, should be [1,0,0,0])"
     )
 
 

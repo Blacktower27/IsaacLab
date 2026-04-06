@@ -7,9 +7,9 @@ Use this to verify:
   3. Success fires when tip is >=7mm inside socket AND xy<3mm
 
 Keyboard controls:
-  Arrow Up/Down    — plug +Y/-Y  (world frame)
-  Arrow Left/Right — plug -X/+X
-  Q / E            — plug +Z/-Z  (up / down)
+  Arrow Up/Down    — plug +Y/-Y  (socket local frame)
+  Arrow Left/Right — plug -X/+X  (socket local frame)
+  Q / E            — plug +Z/-Z  (socket local frame)
   I / K            — pitch +/-
   J / L            — yaw   +/-
   U / O            — roll  +/-
@@ -23,11 +23,15 @@ Keyboard controls:
 Coloured sphere markers (updated every frame):
   BLUE   -- connector tip  (plug local [0,0,-3mm])
   ORANGE -- socket opening centre  (socket local [0,0,0] = socket origin)
-  GREEN  -- per-episode kp_rj45_local in plug frame  (keypoints_held)
-  YELLOW -- per-episode kp_rj45_local in socket frame (keypoints_fixed)
+  GREEN  -- per-episode uniformly sampled kp_rj45_male_local in plug frame   (keypoints_held)
+  YELLOW -- per-episode uniformly sampled kp_rj45_female_local in socket frame (keypoints_fixed)
   WHITE  -- adjustable female rear-edge guide (female local frame)
   CYAN   -- adjustable male bottom patch (male local frame)
-  GREEN/YELLOW overlap -> keypoint_dist = 0 -> origins aligned
+  MAGENTA-- success target (get_target_held_base_pose in socket local frame)
+  RED    -- +X axis (both male & female local frames)
+  GREEN  -- +Y axis (both male & female local frames, pure-green dotted line)
+  BLUE   -- +Z axis (both male & female local frames, pure-blue dotted line)
+  GREEN/YELLOW overlap -> keypoint_dist = 0 -> plug at full insertion target
 
 Usage
 -----
@@ -69,7 +73,7 @@ import gymnasium as gym
 import isaacsim.core.utils.torch as torch_utils
 import isaaclab.sim as sim_utils
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
+from isaaclab.utils.math import euler_xyz_from_quat, quat_conjugate, quat_from_euler_xyz, quat_mul
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
@@ -84,21 +88,37 @@ from isaaclab_tasks.utils import parse_env_cfg
 _TIP_LOCAL      = (0.0, 0.0, -0.003)   # connector tip in plug USD frame
 _OPENING_LOCAL  = (0.0, 0.0,  0.000)   # socket opening centre = socket USD origin
 
-# Empirically calibrated: "full insertion" has plug origin at socket_local:
-#   Z = +17 mm  (true cavity entrance is 17 mm above socket USD origin)
-#   Y =  -6 mm  (cavity centre is 6 mm in -Y from socket USD origin)
-_XY_OFFSET_ORIGINS = (0.0, -0.006)
+# Teleport offsets: computed from task config in _init_teleport_offsets().
+# Kept as module globals so _teleport / _poll_keys_and_move_plug can use them.
+_XY_OFFSET_ORIGINS = (0.0, 0.0)
+_Z_OFFSET_ENGAGE  = 0.0
+_Z_OFFSET_SUCCESS = 0.0
+_Z_OFFSET_ORIGINS = 0.0
 
-# Z offset from socket origin to place plug origin at key positions:
-#   F (ENGAGE)  = tip 30 mm above cavity entrance (+17 mm)
-#     plug_origin_z = 0.017 + 0.030 + 0.003 = 0.050
-#   G (SUCCESS) = 2 mm below full-insertion target
-#     tip target = 0.017 - 0.003 = 0.014; success = 0.014 - 0.002 = 0.012
-#     plug_origin_z = 0.012 + 0.003 = 0.015
-#   R (ORIGINS) = empirical full insertion (plug origin 17 mm above socket origin)
-_Z_OFFSET_ENGAGE  =  0.050    # F key: tip 30 mm above cavity entrance
-_Z_OFFSET_SUCCESS =  0.015    # G key: tip 2 mm below full-insertion target
-_Z_OFFSET_ORIGINS =  0.017    # R key: visual full insertion (calibrated empirically)
+
+def _init_teleport_offsets(cfg_task):
+    """Derive teleport positions from the task config (single source of truth).
+
+    cfg_task.socket_target_y_local  — cavity centre Y offset in socket frame
+    cfg_task.socket_target_z_local  — tip Z at full insertion in socket frame
+    held_base_z_offset              — tip offset below plug USD origin (from RJ45MaleCfg)
+    """
+    global _XY_OFFSET_ORIGINS, _Z_OFFSET_ENGAGE, _Z_OFFSET_SUCCESS, _Z_OFFSET_ORIGINS
+
+    target_y = cfg_task.socket_target_y_local
+    target_z = cfg_task.socket_target_z_local
+    held_base_z_offset = cfg_task.held_asset_cfg.base_height  # -0.003 for RJ45
+
+    # Plug-origin Z at full insertion = target_tip_Z - held_base_z_offset
+    plug_origin_z_insert = target_z - held_base_z_offset
+
+    _XY_OFFSET_ORIGINS = (0.0, target_y)
+    _Z_OFFSET_ORIGINS  = plug_origin_z_insert
+    _Z_OFFSET_ENGAGE   = plug_origin_z_insert + 0.030 + abs(held_base_z_offset)
+    # Success boundary: tip at height_threshold depth
+    height_threshold = cfg_task.fixed_asset_cfg.height + cfg_task.success_threshold
+    success_tip_z = target_z + height_threshold
+    _Z_OFFSET_SUCCESS = success_tip_z - held_base_z_offset
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +155,7 @@ def _key(k) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Plug pose state (offset from socket origin in world frame).
+# Plug pose state (offset from socket origin in socket local frame).
 # R/F/G snap these to preset positions.
 # ---------------------------------------------------------------------------
 _pos_z_offset: float = _Z_OFFSET_ENGAGE   # initial position: engage zone
@@ -144,6 +164,8 @@ _euler_offset  = [0.0, 0.0, 0.0]          # [roll, pitch, yaw]
 _BOTTOM_PATCH_X_SAMPLES = 5
 _BOTTOM_PATCH_Y_SAMPLES = 4
 _REAR_EDGE_MARKER_SAMPLES = 11
+_AXIS_LENGTH  = 0.020   # 20 mm total axis display length
+_AXIS_SAMPLES = 3       # dotted spheres per axis
 
 
 def _teleport(z_off: float, label: str, xy_off=(0.0, 0.0)):
@@ -231,12 +253,13 @@ def _poll_keys_and_move_plug(inner):
     socket_pos_w  = inner._fixed_asset.data.root_pos_w.clone()   # (N,3) world
     socket_quat_w = inner._fixed_asset.data.root_quat_w.clone()  # (N,4) wxyz
 
-    # Compose offset: XY in world frame, Z along world Z.
-    off = torch.tensor(
+    # Compose offset in socket (female) local frame, then rotate to world.
+    off_local = torch.tensor(
         [_pos_xy_offset[0], _pos_xy_offset[1], _pos_z_offset],
         device=device, dtype=torch.float32,
-    ).unsqueeze(0)
-    plug_pos_w = socket_pos_w + off
+    ).unsqueeze(0).expand(num_envs, -1)
+    off_world = torch_utils.quat_rotate(socket_quat_w, off_local)
+    plug_pos_w = socket_pos_w + off_world
 
     # Orientation: socket_quat + euler delta.
     r, p, y = _euler_offset
@@ -290,6 +313,22 @@ def _get_markers() -> VisualizationMarkers:
                     radius=0.0026,
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.95, 0.95)),
                 ),
+                "success_target": sim_utils.SphereCfg(  # success target — MAGENTA
+                    radius=0.004,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.2, 0.9)),
+                ),
+                "axis_x": sim_utils.SphereCfg(       # +X axis — RED
+                    radius=0.0015,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+                ),
+                "axis_y": sim_utils.SphereCfg(       # +Y axis — pure GREEN
+                    radius=0.0015,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+                ),
+                "axis_z": sim_utils.SphereCfg(       # +Z axis — pure BLUE
+                    radius=0.0015,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
+                ),
             },
         )
         _markers = VisualizationMarkers(cfg)
@@ -316,31 +355,57 @@ def _draw_markers(inner):
     _, tip_env     = torch_utils.tf_combine(held_quat,  held_pos,  ident_q, tip_loc)
     _, opening_env = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, opening_loc)
 
-    translations_list   = [tip_env + env_orig, opening_env + env_orig]
+    # Success target from get_target_held_base_pose (MAGENTA).
+    from isaaclab_tasks.direct.factory import factory_utils as _fu
+    target_pos, _ = _fu.get_target_held_base_pose(
+        fixed_pos, fixed_quat, inner.cfg_task.name,
+        inner.cfg_task.fixed_asset_cfg, num_envs, device,
+        task_cfg=inner.cfg_task,
+    )
+
+    translations_list   = [tip_env + env_orig, opening_env + env_orig, target_pos + env_orig]
     marker_indices_list = [
         torch.zeros(num_envs, dtype=torch.int32, device=device),   # tip=0 (BLUE)
         torch.ones( num_envs, dtype=torch.int32, device=device),   # opening=1 (ORANGE)
+        torch.full((num_envs,), 6, dtype=torch.int32, device=device),  # success_target=6 (MAGENTA)
     ]
 
     # Per-episode body keypoints — use held_base / target_held_base so they
     # coincide at the calibrated full-insertion position (not raw USD origins).
-    if hasattr(inner, "kp_rj45_local"):
-        from isaaclab_tasks.direct.factory import factory_utils
-        held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
-            held_pos, held_quat, inner.cfg_task.name,
-            inner.cfg_task.fixed_asset_cfg, num_envs, device,
-        )
-        target_base_pos, target_base_quat = factory_utils.get_target_held_base_pose(
-            fixed_pos, fixed_quat, inner.cfg_task.name,
-            inner.cfg_task.fixed_asset_cfg, num_envs, device,
-        )
-        n_kp = inner.kp_rj45_local.shape[1]
+    # if hasattr(inner, "kp_rj45_local"):
+    #     from isaaclab_tasks.direct.factory import factory_utils
+    #     held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
+    #         held_pos, held_quat, inner.cfg_task.name,
+    #         inner.cfg_task.fixed_asset_cfg, num_envs, device,
+    #     )
+    #     target_base_pos, target_base_quat = factory_utils.get_target_held_base_pose(
+    #         fixed_pos, fixed_quat, inner.cfg_task.name,
+    #         inner.cfg_task.fixed_asset_cfg, num_envs, device,
+    #     )
+    #     n_kp = inner.kp_rj45_local.shape[1]
+    #     for i in range(n_kp):
+    #         _, kp_h = torch_utils.tf_combine(held_base_quat,   held_base_pos,   ident_q, inner.kp_rj45_local[:, i])
+    #         _, kp_t = torch_utils.tf_combine(target_base_quat, target_base_pos, ident_q, inner.kp_rj45_local[:, i])
+    #         translations_list.append(kp_h + env_orig)
+    #         translations_list.append(kp_t + env_orig)
+    #         marker_indices_list.append(torch.full((num_envs,), 2, dtype=torch.int32, device=device))  # GREEN
+    #         marker_indices_list.append(torch.full((num_envs,), 3, dtype=torch.int32, device=device))  # YELLOW
+    if hasattr(inner, "kp_rj45_male_local"):
+        n_kp = inner.kp_rj45_male_local.shape[1]
         for i in range(n_kp):
-            _, kp_h = torch_utils.tf_combine(held_base_quat,   held_base_pos,   ident_q, inner.kp_rj45_local[:, i])
-            _, kp_t = torch_utils.tf_combine(target_base_quat, target_base_pos, ident_q, inner.kp_rj45_local[:, i])
+            _, kp_h = torch_utils.tf_combine(
+                inner.held_quat, inner.held_pos, ident_q, inner.kp_rj45_male_local[:, i]
+            )
             translations_list.append(kp_h + env_orig)
-            translations_list.append(kp_t + env_orig)
             marker_indices_list.append(torch.full((num_envs,), 2, dtype=torch.int32, device=device))  # GREEN
+
+    if hasattr(inner, "kp_rj45_female_local"):
+        n_kp = inner.kp_rj45_female_local.shape[1]
+        for i in range(n_kp):
+            _, kp_f = torch_utils.tf_combine(
+                fixed_quat, fixed_pos, ident_q, inner.kp_rj45_female_local[:, i]
+            )
+            translations_list.append(kp_f + env_orig)
             marker_indices_list.append(torch.full((num_envs,), 3, dtype=torch.int32, device=device))  # YELLOW
 
     # Adjustable female rear-edge guide, defined directly in the female local frame.
@@ -371,6 +436,22 @@ def _draw_markers(inner):
         )
         translations_list.append(bottom_patch_env + env_orig)
         marker_indices_list.append(torch.full((num_envs,), 5, dtype=torch.int32, device=device))  # CYAN
+
+    # XYZ axis indicators for male (held) and female (fixed) local frames.
+    # Dotted spheres along each positive axis: RED=+X, GREEN=+Y, BLUE=+Z.
+    axis_dirs = torch.eye(3, device=device)
+    for frame_quat, frame_pos in [(held_quat, held_pos), (fixed_quat, fixed_pos)]:
+        for axis_idx in range(3):
+            for si in range(_AXIS_SAMPLES):
+                dist = _AXIS_LENGTH * (si + 1) / _AXIS_SAMPLES
+                local_pt = (axis_dirs[axis_idx] * dist).unsqueeze(0).expand(num_envs, -1)
+                _, axis_pt_env = torch_utils.tf_combine(
+                    frame_quat, frame_pos, ident_q, local_pt,
+                )
+                translations_list.append(axis_pt_env + env_orig)
+                marker_indices_list.append(
+                    torch.full((num_envs,), 7 + axis_idx, dtype=torch.int32, device=device)
+                )
 
     translations   = torch.cat(translations_list,   dim=0)
     marker_indices = torch.cat(marker_indices_list, dim=0)
@@ -417,13 +498,25 @@ def _print_geometry(inner, step, successes, engaged):
     orig_z     = orig_delta[2].item() * 1000
 
     kp_dist_mm = float("nan")
-    if hasattr(inner, "kp_rj45_local"):
-        n_kp = inner.kp_rj45_local.shape[1]
+    # if hasattr(inner, "kp_rj45_local"):
+    #     n_kp = inner.kp_rj45_local.shape[1]
+    #     kp_dists = []
+    #     for i in range(n_kp):
+    #         _, kp_h = torch_utils.tf_combine(held_quat,  held_pos,  ident_q, inner.kp_rj45_local[:, i])
+    #         _, kp_t = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, inner.kp_rj45_local[:, i])
+    #         kp_dists.append((kp_h[0] - kp_t[0]).norm().item())
+    #     kp_dist_mm = sum(kp_dists) / len(kp_dists) * 1000
+    if hasattr(inner, "kp_rj45_male_local") and hasattr(inner, "kp_rj45_female_local"):
+        n_kp = inner.kp_rj45_male_local.shape[1]
         kp_dists = []
         for i in range(n_kp):
-            _, kp_h = torch_utils.tf_combine(held_quat,  held_pos,  ident_q, inner.kp_rj45_local[:, i])
-            _, kp_t = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, inner.kp_rj45_local[:, i])
-            kp_dists.append((kp_h[0] - kp_t[0]).norm().item())
+            _, kp_h = torch_utils.tf_combine(
+                held_quat, held_pos, ident_q, inner.kp_rj45_male_local[:, i]
+            )
+            _, kp_f = torch_utils.tf_combine(
+                fixed_quat, fixed_pos, ident_q, inner.kp_rj45_female_local[:, i]
+            )
+            kp_dists.append((kp_h[0] - kp_f[0]).norm().item())
         kp_dist_mm = sum(kp_dists) / len(kp_dists) * 1000
 
     off_mm  = [_pos_xy_offset[0]*1000, _pos_xy_offset[1]*1000, _pos_z_offset*1000]
@@ -437,6 +530,20 @@ def _print_geometry(inner, step, successes, engaged):
         f"  mean kp_dist: {kp_dist_mm:.2f} mm\n"
         f"  ENGAGE: |XY|<5mm, Z<40mm, |yaw|<20 deg, tilt<15 deg  |  "
         f"SUCCESS: Z<{(inner.cfg_task.fixed_asset_cfg.height + inner.cfg_task.success_threshold) * 1000:.1f} mm AND |XY|<3mm"
+    )
+
+    # --- ORIENTATION CHECK ---
+    fixed_r, fixed_p, fixed_y = euler_xyz_from_quat(fixed_quat[0:1])
+    held_r,  held_p,  held_y  = euler_xyz_from_quat(held_quat[0:1])
+    rel_quat = quat_mul(quat_conjugate(fixed_quat[0:1]), held_quat[0:1])
+    rel_r, rel_p, rel_y = euler_xyz_from_quat(rel_quat)
+    rq = rel_quat[0].cpu()
+    print(
+        f"  --- ORIENTATION CHECK ---\n"
+        f"  fixed  RPY: [{math.degrees(fixed_r.item()):+7.2f}, {math.degrees(fixed_p.item()):+7.2f}, {math.degrees(fixed_y.item()):+7.2f}] deg\n"
+        f"  held   RPY: [{math.degrees(held_r.item()):+7.2f}, {math.degrees(held_p.item()):+7.2f}, {math.degrees(held_y.item()):+7.2f}] deg\n"
+        f"  rel    RPY: [{math.degrees(rel_r.item()):+7.2f}, {math.degrees(rel_p.item()):+7.2f}, {math.degrees(rel_y.item()):+7.2f}] deg  <- should be [0,0,0]\n"
+        f"  rel   quat: [{rq[0]:.4f}, {rq[1]:.4f}, {rq[2]:.4f}, {rq[3]:.4f}]  (wxyz, should be [1,0,0,0])"
     )
 
 
@@ -461,6 +568,10 @@ def main():
     env   = gym.make(env_id, cfg=env_cfg)
     inner = env.unwrapped
 
+    _init_teleport_offsets(env_cfg.task)
+    global _pos_z_offset
+    _pos_z_offset = _Z_OFFSET_ENGAGE
+
     env.reset()
     _init_keyboard()
 
@@ -469,6 +580,11 @@ def main():
         "[CONTROLS]  Arrow=XY  Q/E=Z  I/K=pitch  J/L=yaw  U/O=roll  Shift=5x\n"
         "[TELEPORT]  C=contact-init  R=origin-coincide  F=engage  G=success\n"
         "[MARKERS]   BLUE=tip  ORANGE=opening  GREEN=kp_held  YELLOW=kp_socket  WHITE=rear-edge  CYAN=bottom-patch\n"
+        "[AXES]      RED=+X  GREEN=+Y  BLUE=+Z  (dotted lines on both male & female frames)\n"
+        f"[TARGET]  socket_target_y={env_cfg.task.socket_target_y_local:+.4f}  "
+        f"socket_target_z={env_cfg.task.socket_target_z_local:+.4f}  (from config)\n"
+        f"[TELEPORT Z]  R(origins)={_Z_OFFSET_ORIGINS*1000:.1f}mm  "
+        f"F(engage)={_Z_OFFSET_ENGAGE*1000:.1f}mm  G(success)={_Z_OFFSET_SUCCESS*1000:.1f}mm\n"
         f"[REAR EDGE] female local frame: x={tuple(env_cfg.task.female_rear_edge_x_range_local)}  "
         f"y={env_cfg.task.female_rear_edge_y_local:+.4f}  z={env_cfg.task.female_rear_edge_z_local:+.4f}\n"
         f"[BOTTOM PATCH] male local frame: x={tuple(env_cfg.task.male_bottom_patch_x_range_local)}  "
@@ -476,7 +592,7 @@ def main():
         f"[CONTACT RPY] roll={tuple(env_cfg.task.contact_init_roll_range_deg)}  "
         f"pitch={tuple(env_cfg.task.contact_init_pitch_range_deg)}  "
         f"yaw={tuple(env_cfg.task.contact_init_yaw_range_deg)}\n"
-        "  GREEN+YELLOW overlap -> kp_dist=0 -> origins aligned (R position)\n"
+        "  GREEN+YELLOW overlap -> kp_dist=0 -> plug at full insertion target\n"
     )
 
     # Freeze robot arm every step.

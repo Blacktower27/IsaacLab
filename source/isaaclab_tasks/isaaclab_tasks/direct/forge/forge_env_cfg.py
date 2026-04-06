@@ -226,7 +226,7 @@ class ForgeKukaCtrlCfg(ForgeCtrlCfg):
     # ---------------------------------------------------------------------------
     # [ORIGINAL Franka-tuned value, kept for reference]:
     default_task_prop_gains: list = [565.0, 565.0, 565.0, 28.0, 28.0, 28.0]
-    # default_task_prop_gains: list = [2500.0, 2500.0, 2500.0, 28.0, 28.0, 28.0]
+    # default_task_prop_gains: list = [800.0, 800.0, 800.0, 80.0, 80.0, 80.0]
 
     # ---------------------------------------------------------------------------
     # Per-joint torque clamp for Kuka iiwa7.

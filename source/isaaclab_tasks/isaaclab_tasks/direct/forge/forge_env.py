@@ -7,7 +7,7 @@ import torch
 
 import isaacsim.core.utils.torch as torch_utils
 
-from isaaclab.utils.math import axis_angle_from_quat
+from isaaclab.utils.math import axis_angle_from_quat, quat_apply_inverse
 
 from isaaclab_tasks.direct.factory import factory_utils
 from isaaclab_tasks.direct.factory.factory_env import FactoryEnv
@@ -79,6 +79,19 @@ class ForgeEnv(FactoryEnv):
         self.noisy_fingertip_quat[:, [0, 3]] = 0.0
         self.noisy_fingertip_quat = self.noisy_fingertip_quat * self.flip_quats.unsqueeze(-1)
 
+        # EE orientation relative to fixed asset frame
+        self.noisy_fingertip_quat_rel_fixed = torch_utils.quat_mul(
+            torch_utils.quat_conjugate(self.fixed_quat),
+            self.noisy_fingertip_quat,
+        )
+        # EE position relative to noisy fixed tip, in fixed-asset local frame
+        _noisy_fixed_pos = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+        _pos_diff_world = self.noisy_fingertip_pos - _noisy_fixed_pos
+        self.noisy_fingertip_pos_rel_fixed_local = quat_apply_inverse(
+            self.fixed_quat, _pos_diff_world
+        )
+
+
         # Repeat finite differencing with noisy fingertip positions.
         self.ee_linvel_fd = (self.noisy_fingertip_pos - self.prev_fingertip_pos) / dt
         self.prev_fingertip_pos = self.noisy_fingertip_pos.clone()
@@ -125,11 +138,20 @@ class ForgeEnv(FactoryEnv):
         if self.cfg_task.name in ("rj45_insert", "bnc_insert"):
             prev_actions[:, 4] = 0.0
 
+        # obs_dict.update(
+        #     {
+        #         "fingertip_pos": self.noisy_fingertip_pos,
+        #         "fingertip_pos_rel_fixed": self.noisy_fingertip_pos - noisy_fixed_pos,
+        #         "fingertip_quat": self.noisy_fingertip_quat,
+        #         "force_threshold": self.contact_penalty_thresholds[:, None],
+        #         "ft_force": self.noisy_force,
+        #         "prev_actions": prev_actions,
+        #     }
+        # )
         obs_dict.update(
             {
-                "fingertip_pos": self.noisy_fingertip_pos,
-                "fingertip_pos_rel_fixed": self.noisy_fingertip_pos - noisy_fixed_pos,
-                "fingertip_quat": self.noisy_fingertip_quat,
+                "fingertip_pos_rel_fixed": self.noisy_fingertip_pos_rel_fixed_local,
+                "fingertip_quat": self.noisy_fingertip_quat_rel_fixed,
                 "force_threshold": self.contact_penalty_thresholds[:, None],
                 "ft_force": self.noisy_force,
                 "prev_actions": prev_actions,
@@ -165,25 +187,49 @@ class ForgeEnv(FactoryEnv):
         # Step (1): Compute desired pose targets in EE frame.
         # (1.a) Position. Action frame is assumed to be the top of the bolt (noisy estimate).
         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
-        ctrl_target_fingertip_preclipped_pos = fixed_pos_action_frame + pos_actions
+        # ctrl_target_fingertip_preclipped_pos = fixed_pos_action_frame + pos_actions
+        pos_actions_world = torch_utils.quat_rotate(self.fixed_quat, pos_actions)
+        ctrl_target_fingertip_preclipped_pos = fixed_pos_action_frame + pos_actions_world
         # (1.b) Enforce rotation action constraints.
         rot_actions[:, 0] = 0.0
         if self.cfg_task.name in ("rj45_insert", "bnc_insert"):
             rot_actions[:, 1] = 0.0
 
-        # Assumes joint limit is in (+x, -y)-quadrant of world frame.
-        rot_actions[:, 2] = np.deg2rad(-180.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0  # Joint limit.
-        # (1.c) Get desired orientation target.
-        bolt_frame_quat = torch_utils.quat_from_euler_xyz(
+        # # Assumes joint limit is in (+x, -y)-quadrant of world frame.
+        # rot_actions[:, 2] = np.deg2rad(-180.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0  # Joint limit.
+        # # (1.c) Get desired orientation target.
+        # bolt_frame_quat = torch_utils.quat_from_euler_xyz(
+        #     roll=rot_actions[:, 0], pitch=rot_actions[:, 1], yaw=rot_actions[:, 2]
+        # )
+
+        # rot_180_euler = torch.tensor([np.pi, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+        # quat_bolt_to_ee = torch_utils.quat_from_euler_xyz(
+        #     roll=rot_180_euler[:, 0], pitch=rot_180_euler[:, 1], yaw=rot_180_euler[:, 2]
+        # )
+
+        # ctrl_target_fingertip_preclipped_quat = torch_utils.quat_mul(quat_bolt_to_ee, bolt_frame_quat)
+
+        # Yaw: symmetric mapping [-1,1] -> [-180deg, +180deg], relative to fixed asset
+        #for kuka
+        # rot_actions[:, 2] = np.deg2rad(360.0) * (rot_actions[:, 2] + 1.0) / 2.0 - np.deg2rad(180.0)
+        #--------------------------------------------------------
+
+        #for franka limit yaw
+        rot_actions[:, 2] = np.deg2rad(-180.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0 
+        #--------------------------------------------------------
+        
+        # (1.c) Build orientation target in fixed-asset local frame, then convert to world.
+        bolt_frame_quat_local = torch_utils.quat_from_euler_xyz(
             roll=rot_actions[:, 0], pitch=rot_actions[:, 1], yaw=rot_actions[:, 2]
         )
+        bolt_frame_quat_world = torch_utils.quat_mul(self.fixed_quat, bolt_frame_quat_local)
 
         rot_180_euler = torch.tensor([np.pi, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         quat_bolt_to_ee = torch_utils.quat_from_euler_xyz(
             roll=rot_180_euler[:, 0], pitch=rot_180_euler[:, 1], yaw=rot_180_euler[:, 2]
         )
 
-        ctrl_target_fingertip_preclipped_quat = torch_utils.quat_mul(quat_bolt_to_ee, bolt_frame_quat)
+        ctrl_target_fingertip_preclipped_quat = torch_utils.quat_mul(quat_bolt_to_ee, bolt_frame_quat_world)
 
         # Step (2): Clip targets if they are too far from current EE pose.
         # (2.a): Clip position targets.
@@ -282,7 +328,9 @@ class ForgeEnv(FactoryEnv):
 
         # Compute initial action for correct EMA computation.
         fixed_pos_action_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
-        pos_actions = self.fingertip_midpoint_pos - fixed_pos_action_frame
+        # pos_actions = self.fingertip_midpoint_pos - fixed_pos_action_frame
+        pos_diff_world = self.fingertip_midpoint_pos - fixed_pos_action_frame
+        pos_actions = quat_apply_inverse(self.fixed_quat, pos_diff_world)
         pos_action_bounds = torch.tensor(self.cfg.ctrl.pos_action_bounds, device=self.device)
         pos_actions = pos_actions @ torch.diag(1.0 / pos_action_bounds)
         self.actions[:, 0:3] = self.prev_actions[:, 0:3] = pos_actions
@@ -293,16 +341,35 @@ class ForgeEnv(FactoryEnv):
             roll=unrot_180_euler[:, 0], pitch=unrot_180_euler[:, 1], yaw=unrot_180_euler[:, 2]
         )
 
-        fingertip_quat_rel_bolt = torch_utils.quat_mul(unrot_quat, self.fingertip_midpoint_quat)
-        _, _, fingertip_yaw_bolt = torch_utils.get_euler_xyz(fingertip_quat_rel_bolt)
-        fingertip_yaw_bolt = torch.where(
-            fingertip_yaw_bolt > torch.pi / 2, fingertip_yaw_bolt - 2 * torch.pi, fingertip_yaw_bolt
+        # fingertip_quat_rel_bolt = torch_utils.quat_mul(unrot_quat, self.fingertip_midpoint_quat)
+        # _, _, fingertip_yaw_bolt = torch_utils.get_euler_xyz(fingertip_quat_rel_bolt)
+        # fingertip_yaw_bolt = torch.where(
+        #     fingertip_yaw_bolt > torch.pi / 2, fingertip_yaw_bolt - 2 * torch.pi, fingertip_yaw_bolt
+        # )
+        # fingertip_yaw_bolt = torch.where(
+        #     fingertip_yaw_bolt < -torch.pi, fingertip_yaw_bolt + 2 * torch.pi, fingertip_yaw_bolt
+        # )
+        # yaw_action = (fingertip_yaw_bolt + np.deg2rad(180.0)) / np.deg2rad(270.0) * 2.0 - 1.0
+        
+        fingertip_quat_unflipped = torch_utils.quat_mul(unrot_quat, self.fingertip_midpoint_quat)
+        fingertip_quat_local = torch_utils.quat_mul(
+            torch_utils.quat_conjugate(self.fixed_quat), fingertip_quat_unflipped
         )
-        fingertip_yaw_bolt = torch.where(
-            fingertip_yaw_bolt < -torch.pi, fingertip_yaw_bolt + 2 * torch.pi, fingertip_yaw_bolt
-        )
+        _, _, fingertip_yaw_local = torch_utils.get_euler_xyz(fingertip_quat_local)
+        #for kuka 
+        # fingertip_yaw_local = torch.where(
+        #     fingertip_yaw_local > torch.pi, fingertip_yaw_local - 2 * torch.pi, fingertip_yaw_local
+        # )
+        # yaw_action = (fingertip_yaw_local + np.deg2rad(180.0)) / np.deg2rad(180.0) - 1.0
+        #--------------------------------------------------------
 
-        yaw_action = (fingertip_yaw_bolt + np.deg2rad(180.0)) / np.deg2rad(270.0) * 2.0 - 1.0
+        #for franka limit yaw
+        fingertip_yaw_local = torch.where(fingertip_yaw_local > torch.pi / 2, fingertip_yaw_local - 2 * torch.pi, fingertip_yaw_local)
+        fingertip_yaw_local = torch.where(
+            fingertip_yaw_local < -torch.pi, fingertip_yaw_local + 2 * torch.pi, fingertip_yaw_local
+        )
+        yaw_action = (fingertip_yaw_local + np.deg2rad(180.0)) / np.deg2rad(270.0) * 2.0 - 1.0
+        #--------------------------------------------------------
         self.actions[:, 5] = self.prev_actions[:, 5] = yaw_action
         self.actions[:, 6] = self.prev_actions[:, 6] = -1.0
 
@@ -340,6 +407,32 @@ class ForgeEnv(FactoryEnv):
         self.flip_quats = torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
         rand_flips = torch.rand(self.num_envs) > 0.5
         self.flip_quats[rand_flips] = -1.0
+
+
+
+        # # ---- DEBUG: round-trip check (delete after verification) ----
+        # _pos_act = self.actions[:, 0:3]
+        # _pos_act_scaled = _pos_act @ torch.diag(torch.tensor(self.cfg.ctrl.pos_action_bounds, device=self.device))
+        # _fixed_frame = self.fixed_pos_obs_frame + self.init_fixed_pos_obs_noise
+        # _pos_target = _fixed_frame + torch_utils.quat_rotate(self.fixed_quat, _pos_act_scaled)
+        # _pos_err = (_pos_target - self.fingertip_midpoint_pos).abs().max()
+        # print(f"[DEBUG] pos round-trip max error: {_pos_err.item():.6e}")
+
+        # _rot_act = self.actions[:, 3:6].clone()
+        # _rot_act_scaled = _rot_act @ torch.diag(torch.tensor(self.cfg.ctrl.rot_action_bounds, device=self.device))
+        # _rot_act_scaled[:, 0] = 0.0
+        # _yaw_rad = np.deg2rad(360.0) * (_rot_act_scaled[:, 2] + 1.0) / 2.0 - np.deg2rad(180.0)
+        # _local_quat = torch_utils.quat_from_euler_xyz(torch.zeros_like(_yaw_rad), _rot_act_scaled[:, 1], _yaw_rad)
+        # _world_quat = torch_utils.quat_mul(self.fixed_quat, _local_quat)
+        # _rot180 = torch_utils.quat_from_euler_xyz(
+        #     torch.full_like(_yaw_rad, np.pi), torch.zeros_like(_yaw_rad), torch.zeros_like(_yaw_rad)
+        # )
+        # _target_quat = torch_utils.quat_mul(_rot180, _world_quat)
+        # _quat_diff = torch_utils.quat_mul(torch_utils.quat_conjugate(_target_quat), self.fingertip_midpoint_quat)
+        # _quat_diff *= torch.sign(_quat_diff[:, 0]).unsqueeze(-1)
+        # _rot_err = axis_angle_from_quat(_quat_diff).abs().max()
+        # print(f"[DEBUG] rot round-trip max error: {_rot_err.item():.6e}")
+        # # ---- END DEBUG ----
 
     def _reset_buffers(self, env_ids):
         """Reset additional logging metrics."""

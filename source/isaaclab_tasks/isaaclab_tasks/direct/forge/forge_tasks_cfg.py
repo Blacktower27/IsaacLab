@@ -405,7 +405,8 @@ class ForgeRJ45Insert(ForgeTask):
     # Geometry: cavity entrance = socket_origin + 17 mm; TCP-to-tip offset = 64 mm.
     # Formula: TCP_above_origin = tip_above_cavity + 0.017 + 0.064
     # Near mode: tip 30 mm above cavity entrance → TCP = 0.030 + 0.081 = 0.111 m
-    hand_init_pos: list = [0.00, 0.00, 0.111]
+    # hand_init_pos: list = [0.00, 0.00, 0.111]
+    hand_init_pos: list = [0.00, 0.00, 0.211]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0.0, 0.0]   # EE pointing down
     hand_init_orn_noise: list = [0.0, 0.0, 0.0]
@@ -414,20 +415,21 @@ class ForgeRJ45Insert(ForgeTask):
     # TCP Z range above socket USD origin (metres).
     # tip_above_cavity = TCP_above_origin - 0.081
     # [0.091, 0.231] → tip 10 mm to 150 mm above cavity entrance
-    hand_init_x_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
-    hand_init_y_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
-    hand_init_z_range: list = [0.101, 0.181]  # tip 20~100 mm above cavity entrance
-    hand_init_yaw_noise_deg: float = 30.0      # ±30° from socket yaw (no pitch)
+    hand_init_x_range: list = [-0.03, 0.01]   # ±60 mm from socket axis
+    hand_init_y_range: list = [-0.02, 0.02]   # ±60 mm from socket axis
+    # hand_init_z_range: list = [0.071, 0.081]  # for kuka
+    hand_init_z_range: list = [0.081, 0.091]  # for franka
+    hand_init_yaw_noise_deg: float = 10.0      # ±30° from socket yaw (no pitch)
     hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
 
     # --- Init mode ---
     # "near"    : fixed position directly above socket (hand_init_pos, deterministic).
     # "far"     : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
     # "mixed"   : near_init_prob fraction of envs start near, the rest far.
-    # "contact" : Kuka RJ45 only. Sample RPY in the female frame, then align a
-    #             random point on the male bottom patch to a random point on the
-    #             female rear edge.
-    init_mode: str = "near"
+    # "contact" : Sample RPY in the female frame, then align a random point on the
+    #             male bottom patch to a random point on the female rear edge.
+    #             Works for both Kuka (embedded link_rj45) and Franka (separate held asset).
+    init_mode: str = "far"
     near_init_prob: float = 0.5
     # Female rear-edge guide for contact-init debugging, expressed in the
     # FEMALE local frame. The visualizer draws a line segment at:
@@ -454,7 +456,17 @@ class ForgeRJ45Insert(ForgeTask):
     # directly without hard-coded geometry logic in factory_utils.
     contact_init_roll_range_deg: list = [0.0, 0.0]
     contact_init_pitch_range_deg: list = [0.0, 0.0]
-    contact_init_yaw_range_deg: list = [-20.0, 20.0]
+    contact_init_yaw_range_deg: list = [-10.0, 10.0]
+
+    # --- Insertion target (socket local frame) ---
+    # Position of the held part's tip (held_base) at full insertion,
+    # expressed in the female socket's local frame (metres).
+    #   Y = cavity centre offset from socket USD origin
+    #   Z = target tip Z at full insertion (= cavity entrance - tip offset)
+    # These values are the single source of truth for success detection,
+    # get_target_held_base_pose, and the visualizer teleport positions.
+    socket_target_y_local: float = -0.006
+    socket_target_z_local: float =  0.014
 
     # --- Fixed asset (socket) randomisation ---
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
@@ -462,12 +474,14 @@ class ForgeRJ45Insert(ForgeTask):
     fixed_asset_init_orn_range_deg: float = 360.0
 
     # --- Held asset (plug) in-gripper noise ---
-    held_asset_pos_noise: list = [0.002, 0.002, 0.002]
-    held_asset_rot_init: float = 0.0
-    held_asset_pos_offset: list = [0.0, 0.0, 0.0]
+    held_asset_pos_noise: list = [0.0, 0.0, 0.0]
+    held_asset_rot_init: float = 180.0
+    held_asset_rot_offset: list = [0.0, 0.0, 0.0]  # [roll, pitch, yaw] deg
+    held_asset_pos_offset: list = [0.0, 0.0, -0.06]
 
     # --- Reward shaping ---
     contact_penalty_scale: float = 0.0
+    # contact_penalty_scale: float = 0.05
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
@@ -480,7 +494,7 @@ class ForgeRJ45Insert(ForgeTask):
     #   target tip position: socket-local Z = +0.014 m (empirically calibrated).
     #   height_threshold = 0.0 + (-0.002) = -0.002 m.
     #   curr_success fires once tip reaches socket-local Z = 0.012 m AND XY < 3 mm.
-    success_threshold: float = 0.024
+    success_threshold: float = 0.027
     # Two-phase keypoint strategy (mirrors box_lid_insert):
     #   Phase 1 (before first success): num_reset_kp Z-axis keypoints (X=Y=0).
     #     Pure Z spread gives a clear gradient for XY alignment and approach,
@@ -488,8 +502,21 @@ class ForgeRJ45Insert(ForgeTask):
     #   Phase 2 (after first success): num_success_kp random body keypoints (full XYZ).
     #     Denser coverage for sustained deep insertion guidance.
     # Buffer size = max(num_reset_kp, num_success_kp).
-    num_reset_kp: int = 4    # Z-axis keypoints during approach (phase 1)
+    num_reset_kp: int = 64    # Z-axis keypoints during approach (phase 1)
     num_success_kp: int = 10  # random body keypoints after first success (phase 2)
+
+    # Progressive keypoint descent: once the mean keypoint distance drops below
+    # kp_advance_threshold, the female keypoints' Z is decreased by kp_advance_step
+    # each env-step, pulling the target deeper and guiding insertion.
+    # Clamped at kp_advance_z_limit (socket local frame).
+    #
+    # NOTE: female keypoints are now initialised at Z = male_kp_z + plug_origin_dz
+    # (≈ -0.043 with default values).  kp_advance_z_limit MUST be <= that initial Z
+    # for the clamp not to push keypoints back up.  Set equal to init Z to disable
+    # progressive descent; set lower to pull keypoints deeper than full insertion.
+    kp_advance_threshold: float = 0.005   # trigger distance (m)
+    kp_advance_step: float = 0.0002       # Z descent per env-step (m)
+    kp_advance_z_limit: float = -0.060    # minimum female kp Z in socket local frame (m)
 
     # --- Scene assets (RJ45 Female socket is kinematic RigidObject) ---
     fixed_asset: RigidObjectCfg = RigidObjectCfg(
@@ -634,8 +661,8 @@ class ForgeBNCSmallInsert(ForgeTask):
     # yaw is aligned to socket yaw (or +180°) ± hand_init_yaw_noise_deg; no pitch noise.
     hand_init_x_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
     hand_init_y_range: list = [-0.06, 0.06]   # ±60 mm from socket axis
-    hand_init_z_range: list = [0.07, 0.15]    # 70~150 mm above socket opening
-    hand_init_yaw_noise_deg: float = 30.0      # ±30° from socket yaw (0° or 180° base)
+    hand_init_z_range: list = [0.07, 0.10]    # 70~150 mm above socket opening
+    hand_init_yaw_noise_deg: float = 20.0      # ±30° from socket yaw (0° or 180° base)
     hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
 
     # --- Init mode ---
