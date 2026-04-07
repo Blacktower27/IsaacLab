@@ -421,6 +421,7 @@ class ForgeRJ45Insert(ForgeTask):
     hand_init_z_range: list = [0.081, 0.091]  # for franka
     hand_init_yaw_noise_deg: float = 10.0      # ±30° from socket yaw (no pitch)
     hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
+    hand_init_yaw_offset_deg: float = 0.0    # fixed yaw offset (deg) added on top of socket-yaw alignment
 
     # --- Init mode ---
     # "near"    : fixed position directly above socket (hand_init_pos, deterministic).

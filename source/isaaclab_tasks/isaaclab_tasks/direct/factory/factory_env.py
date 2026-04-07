@@ -1435,7 +1435,7 @@ class FactoryEnv(DirectRLEnv):
                     # RJ45 connector face is rotated 90° relative to the socket in the robot frame,
                     # so add a 90° yaw offset on top of the socket yaw to align properly.
                     # _yaw_offset = 0.5 * torch.pi if self.cfg_task.name == "rj45_insert" else 0.0
-                    _yaw_offset=0.0
+                    _yaw_offset = np.deg2rad(getattr(self.cfg_task, "hand_init_yaw_offset_deg", 0.0))
 
                     # Near mode: exact socket yaw alignment (no noise).
                     near_mask = _is_near[bad_envs]

@@ -161,18 +161,32 @@ def _key(k) -> bool:
 _pos_z_offset: float = _Z_OFFSET_ENGAGE   # initial position: engage zone
 _pos_xy_offset = [0.0, 0.0]               # [x, y] additional offset
 _euler_offset  = [0.0, 0.0, 0.0]          # [roll, pitch, yaw]
+_YAW_OFFSET_RAD: float = 0.0              # set in main() from hand_init_yaw_offset_deg
 _BOTTOM_PATCH_X_SAMPLES = 5
 _BOTTOM_PATCH_Y_SAMPLES = 4
 _REAR_EDGE_MARKER_SAMPLES = 11
 _AXIS_LENGTH  = 0.020   # 20 mm total axis display length
 _AXIS_SAMPLES = 3       # dotted spheres per axis
 
+# ---------------------------------------------------------------------------
+# Franka yaw dead-zone arc (marker indices 10-12)
+# Franka action[-1,+1] → yaw[-180°, +90°]; the 90°→180° sector is unreachable.
+# ---------------------------------------------------------------------------
+_YAW_ARC_RADIUS  = 0.050   # ring radius around socket origin (m)
+_YAW_ARC_Z       = 0.015   # height above socket origin (m)
+_YAW_ARC_SAMPLES = 72      # one sphere per 5° (full 360°)
+_YAW_IND_SAMPLES = 5       # dots along current-yaw indicator line
+# _FRANKA_YAW_MIN  = math.radians(-180.0)  # old: valid [-180°,+90°]
+# _FRANKA_YAW_MAX  = math.radians(  90.0)  # old
+_FRANKA_YAW_MIN  = math.radians(   0.0)   # valid [0°, +270°], dead zone (-90°, 0°)
+_FRANKA_YAW_MAX  = math.radians( 270.0)
+
 
 def _teleport(z_off: float, label: str, xy_off=(0.0, 0.0)):
     global _pos_z_offset, _pos_xy_offset, _euler_offset
     _pos_z_offset  = z_off
     _pos_xy_offset = [xy_off[0], xy_off[1]]
-    _euler_offset  = [0.0, 0.0, 0.0]
+    _euler_offset  = [0.0, 0.0, _YAW_OFFSET_RAD]
     print(f"[TELEPORT -> {label}]  plug_origin = socket_origin + X={xy_off[0]*1000:.1f} Y={xy_off[1]*1000:.1f} Z={z_off*1000:.1f} mm")
 
 
@@ -329,10 +343,69 @@ def _get_markers() -> VisualizationMarkers:
                     radius=0.0015,
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
                 ),
+                "yaw_arc_ok": sim_utils.SphereCfg(  # Franka allowed yaw arc — bright green (idx 10)
+                    radius=0.0018,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 1.0, 0.3)),
+                ),
+                "yaw_arc_bad": sim_utils.SphereCfg( # Franka dead-zone arc — red (idx 11)
+                    radius=0.0018,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.1, 0.1)),
+                ),
+                "yaw_ind": sim_utils.SphereCfg(     # current plug yaw indicator — yellow (idx 12)
+                    radius=0.0030,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0)),
+                ),
             },
         )
         _markers = VisualizationMarkers(cfg)
     return _markers
+
+
+def _draw_yaw_arc(inner, translations_list, marker_indices_list):
+    """Franka-only: append yaw-arc and current-yaw indicator to marker lists.
+
+    Green ring  (idx 10): allowed yaw sector  [-180°, +90°]
+    Red ring    (idx 11): dead zone            (+90°, +180°]
+    Yellow dots (idx 12): current plug yaw relative to socket
+    """
+    device   = inner.device
+    num_envs = inner.num_envs
+    fixed_pos  = inner._fixed_asset.data.root_pos_w - inner.scene.env_origins
+    fixed_quat = inner._fixed_asset.data.root_quat_w
+    held_quat  = inner._held_asset.data.root_quat_w
+    env_orig   = inner.scene.env_origins
+    ident_q    = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(num_envs, -1)
+
+    # 1) Full 360° ring: green for allowed yaw, red for dead zone.
+    for i in range(_YAW_ARC_SAMPLES):
+        theta     = math.radians(-180.0 + 360.0 * i / _YAW_ARC_SAMPLES)
+        theta_norm = theta % (2 * math.pi)   # normalize to [0, 2π) for range check
+        in_range  = _FRANKA_YAW_MIN <= theta_norm <= _FRANKA_YAW_MAX
+        midx      = 10 if in_range else 11
+        local_pt  = torch.tensor(
+            [_YAW_ARC_RADIUS * math.cos(theta),
+             _YAW_ARC_RADIUS * math.sin(theta),
+             _YAW_ARC_Z],
+            device=device, dtype=torch.float32,
+        ).unsqueeze(0).expand(num_envs, -1)
+        _, arc_env = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, local_pt)
+        translations_list.append(arc_env + env_orig)
+        marker_indices_list.append(torch.full((num_envs,), midx, dtype=torch.int32, device=device))
+
+    # 2) Current-yaw indicator: dots from socket centre toward plug yaw angle.
+    rel_q  = quat_mul(quat_conjugate(fixed_quat), held_quat)
+    _, _, rel_yaw = euler_xyz_from_quat(rel_q)   # (num_envs,)
+    cos_y  = torch.cos(rel_yaw)                  # (num_envs,)
+    sin_y  = torch.sin(rel_yaw)
+    for si in range(1, _YAW_IND_SAMPLES + 1):
+        r        = _YAW_ARC_RADIUS * si / _YAW_IND_SAMPLES
+        local_pt = torch.stack(
+            [r * cos_y, r * sin_y, torch.full((num_envs,), _YAW_ARC_Z, device=device)],
+            dim=1,
+        )
+        _, ind_env = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, local_pt)
+        translations_list.append(ind_env + env_orig)
+        marker_indices_list.append(torch.full((num_envs,), 12, dtype=torch.int32, device=device))
 
 
 def _draw_markers(inner):
@@ -453,6 +526,9 @@ def _draw_markers(inner):
                     torch.full((num_envs,), 7 + axis_idx, dtype=torch.int32, device=device)
                 )
 
+    if not args_cli.use_kuka:
+        _draw_yaw_arc(inner, translations_list, marker_indices_list)
+
     translations   = torch.cat(translations_list,   dim=0)
     marker_indices = torch.cat(marker_indices_list, dim=0)
     identity_q     = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(len(translations), -1)
@@ -546,6 +622,17 @@ def _print_geometry(inner, step, successes, engaged):
         f"  rel   quat: [{rq[0]:.4f}, {rq[1]:.4f}, {rq[2]:.4f}, {rq[3]:.4f}]  (wxyz, should be [1,0,0,0])"
     )
 
+    if not args_cli.use_kuka:
+        yaw_deg    = math.degrees(rel_y.item())
+        in_range   = -180.0 <= yaw_deg <= 90.0
+        action_val = (yaw_deg - (-180.0)) / 270.0 * 2.0 - 1.0   # inverse of Franka yaw mapping
+        status     = "IN-RANGE" if in_range else "*** DEAD ZONE (unreachable) ***"
+        print(
+            f"  --- FRANKA YAW RANGE [-180°, +90°] ---\n"
+            f"  plug yaw (socket frame): {yaw_deg:+.1f}°   action≈{action_val:+.3f}   {status}\n"
+            f"  [GREEN arc = reachable]  [RED arc = dead zone (+90° to +180°)]"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -569,8 +656,10 @@ def main():
     inner = env.unwrapped
 
     _init_teleport_offsets(env_cfg.task)
-    global _pos_z_offset
-    _pos_z_offset = _Z_OFFSET_ENGAGE
+    global _pos_z_offset, _euler_offset, _YAW_OFFSET_RAD
+    _YAW_OFFSET_RAD = math.radians(getattr(env_cfg.task, "hand_init_yaw_offset_deg", 0.0))
+    _pos_z_offset   = _Z_OFFSET_ENGAGE
+    _euler_offset   = [0.0, 0.0, _YAW_OFFSET_RAD]
 
     env.reset()
     _init_keyboard()
@@ -581,6 +670,8 @@ def main():
         "[TELEPORT]  C=contact-init  R=origin-coincide  F=engage  G=success\n"
         "[MARKERS]   BLUE=tip  ORANGE=opening  GREEN=kp_held  YELLOW=kp_socket  WHITE=rear-edge  CYAN=bottom-patch\n"
         "[AXES]      RED=+X  GREEN=+Y  BLUE=+Z  (dotted lines on both male & female frames)\n"
+        "[YAW ARC]   (Franka only) bright-GREEN ring = allowed [-180°,+90°]  RED ring = dead zone (+90°,+180°]\n"
+        "            YELLOW dots = current plug yaw direction (in socket local frame)\n"
         f"[TARGET]  socket_target_y={env_cfg.task.socket_target_y_local:+.4f}  "
         f"socket_target_z={env_cfg.task.socket_target_z_local:+.4f}  (from config)\n"
         f"[TELEPORT Z]  R(origins)={_Z_OFFSET_ORIGINS*1000:.1f}mm  "
