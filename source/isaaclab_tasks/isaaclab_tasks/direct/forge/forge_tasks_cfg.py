@@ -430,7 +430,7 @@ class ForgeRJ45Insert(ForgeTask):
     # "contact" : Sample RPY in the female frame, then align a random point on the
     #             male bottom patch to a random point on the female rear edge.
     #             Works for both Kuka (embedded link_rj45) and Franka (separate held asset).
-    init_mode: str = "far"
+    init_mode: str = "contact"
     near_init_prob: float = 0.5
     # Female rear-edge guide for contact-init debugging, expressed in the
     # FEMALE local frame. The visualizer draws a line segment at:
@@ -481,7 +481,7 @@ class ForgeRJ45Insert(ForgeTask):
     held_asset_pos_offset: list = [0.0, 0.0, -0.06]
 
     # --- Reward shaping ---
-    contact_penalty_scale: float = 0.0
+    contact_penalty_scale: float = 0.05
     # contact_penalty_scale: float = 0.05
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]

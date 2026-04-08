@@ -216,7 +216,9 @@ class ForgeEnv(FactoryEnv):
 
         #for franka limit yaw  (valid: [0°, +270°], dead zone: (-90°, 0°))
         # rot_actions[:, 2] = np.deg2rad(-180.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0  # old: valid [-180°,+90°], dead zone (+90°,+180°)
-        rot_actions[:, 2] = np.deg2rad(0.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0
+        # rot_actions[:, 2] = np.deg2rad(0.0) + np.deg2rad(270.0) * (rot_actions[:, 2] + 1.0) / 2.0  # old: valid [0°,+270°], dead zone (-90°,0°)
+        #for franka no dead zone (full 360°)
+        rot_actions[:, 2] = np.deg2rad(360.0) * (rot_actions[:, 2] + 1.0) / 2.0 - np.deg2rad(180.0)
         #--------------------------------------------------------
         
         # (1.c) Build orientation target in fixed-asset local frame, then convert to world.
@@ -367,12 +369,14 @@ class ForgeEnv(FactoryEnv):
         #for franka limit yaw  (valid: [0°, +270°], dead zone: (-90°, 0°))
         # fingertip_yaw_local = torch.where(fingertip_yaw_local > torch.pi / 2, fingertip_yaw_local - 2 * torch.pi, fingertip_yaw_local)  # old
         # fingertip_yaw_local = torch.where(fingertip_yaw_local < -torch.pi, fingertip_yaw_local + 2 * torch.pi, fingertip_yaw_local)  # old
-        # yaw_action = (fingertip_yaw_local + np.deg2rad(180.0)) / np.deg2rad(270.0) * 2.0 - 1.0  # old
-        fingertip_yaw_local = torch.where(fingertip_yaw_local < -torch.pi / 2, fingertip_yaw_local + 2 * torch.pi, fingertip_yaw_local)
-        fingertip_yaw_local = torch.where(
-            fingertip_yaw_local > torch.pi, fingertip_yaw_local - 2 * torch.pi, fingertip_yaw_local
-        )
-        yaw_action = fingertip_yaw_local / np.deg2rad(270.0) * 2.0 - 1.0
+        # yaw_action = (fingertip_yaw_local + np.deg2rad(180.0)) / np.deg2rad(270.0) * 2.0 - 1.0  # old valid [-180°,+90°]
+        # fingertip_yaw_local = torch.where(fingertip_yaw_local < -torch.pi / 2, fingertip_yaw_local + 2 * torch.pi, fingertip_yaw_local)  # old
+        # fingertip_yaw_local = torch.where(fingertip_yaw_local > torch.pi, fingertip_yaw_local - 2 * torch.pi, fingertip_yaw_local)  # old
+        # yaw_action = fingertip_yaw_local / np.deg2rad(270.0) * 2.0 - 1.0  # old valid [0°,+270°]
+        #for franka no dead zone (full 360°)
+        fingertip_yaw_local = torch.where(fingertip_yaw_local > torch.pi, fingertip_yaw_local - 2 * torch.pi, fingertip_yaw_local)
+        fingertip_yaw_local = torch.where(fingertip_yaw_local < -torch.pi, fingertip_yaw_local + 2 * torch.pi, fingertip_yaw_local)
+        yaw_action = (fingertip_yaw_local + np.deg2rad(180.0)) / np.deg2rad(360.0) * 2.0 - 1.0
         #--------------------------------------------------------
         self.actions[:, 5] = self.prev_actions[:, 5] = yaw_action
         self.actions[:, 6] = self.prev_actions[:, 6] = -1.0

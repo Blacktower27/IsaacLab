@@ -178,8 +178,10 @@ _YAW_ARC_SAMPLES = 72      # one sphere per 5° (full 360°)
 _YAW_IND_SAMPLES = 5       # dots along current-yaw indicator line
 # _FRANKA_YAW_MIN  = math.radians(-180.0)  # old: valid [-180°,+90°]
 # _FRANKA_YAW_MAX  = math.radians(  90.0)  # old
-_FRANKA_YAW_MIN  = math.radians(   0.0)   # valid [0°, +270°], dead zone (-90°, 0°)
-_FRANKA_YAW_MAX  = math.radians( 270.0)
+# _FRANKA_YAW_MIN  = math.radians(   0.0)   # old: valid [0°,+270°], dead zone (-90°,0°)
+# _FRANKA_YAW_MAX  = math.radians( 270.0)   # old
+_FRANKA_YAW_MIN  = math.radians(-180.0)   # no dead zone: full 360°
+_FRANKA_YAW_MAX  = math.radians( 180.0)
 
 
 def _teleport(z_off: float, label: str, xy_off=(0.0, 0.0)):
