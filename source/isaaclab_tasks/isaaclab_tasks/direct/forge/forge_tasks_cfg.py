@@ -242,6 +242,10 @@ class ForgeBoxLidInsert(ForgeTask):
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
+    # Rotation weight for frame_dist = keypoint_dist + rot_weight * rot_dist.
+    # rot_dist is geodesic angle (rad) between held lid and fixed box orientations.
+    # 0.05 ≈ 1 radian error contributes ~50 mm to frame_dist.
+    rot_weight: float = 0.05
     # success_threshold < 0.5  → _get_curr_successes uses snap-fit CLIP ENGAGEMENT check
     #   (success_threshold value itself is unused in that branch).
     # engage_threshold  >= 0.5 → _get_curr_successes uses Z-distance height-fraction check:
@@ -410,7 +414,7 @@ class ForgeRJ45Insert(ForgeTask):
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0.0, 0.0]   # EE pointing down
     hand_init_orn_noise: list = [0.0, 0.0, 0.0]
-
+    
     # --- Random initial pose ---
     # TCP Z range above socket USD origin (metres).
     # tip_above_cavity = TCP_above_origin - 0.081
@@ -486,6 +490,7 @@ class ForgeRJ45Insert(ForgeTask):
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
+    rot_weight: float = 1.00
     # engage_threshold > 1.0 → triggers the XY + yaw + tilt alignment check in
     #   _get_curr_successes.  Z is unconstrained — curr_engaged fires whenever the
     #   plug is XY-aligned (tip < 4 mm from opening centre) and correctly oriented
@@ -689,6 +694,7 @@ class ForgeBNCSmallInsert(ForgeTask):
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
+    rot_weight: float = 0.05
     # engage_threshold > 1.0 -> XY + yaw + tilt alignment check (same as rj45_insert).
     engage_threshold: float = 2.0
     # success_threshold < 0 -> tip must be 7.5 mm inside socket (0.025 x 0.3 = 7.5 mm).

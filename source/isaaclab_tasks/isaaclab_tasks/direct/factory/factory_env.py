@@ -865,6 +865,13 @@ class FactoryEnv(DirectRLEnv):
                 )[1]
         keypoint_dist = torch.norm(keypoints_held - keypoints_fixed, p=2, dim=-1).mean(-1)
 
+        # [CUSTOM] Frame distance: keypoint XYZ dist + weighted rotation error.
+        # rot_dist = geodesic angle (rad) between held and fixed asset orientations.
+        # Target orientation for held asset = fixed asset orientation (self.fixed_quat).
+        # rot_weight = 0.0 reduces to pure keypoint_dist (default for upstream tasks).
+        rot_dist = factory_utils.quat_rpy_dist(self.held_quat, self.fixed_quat)
+        frame_dist = keypoint_dist + self.cfg_task.rot_weight * rot_dist
+
         # [CUSTOM] Progressive descent for rj45: when male keypoints are close
         # enough, pull female target Z downward to guide deeper insertion.
         if self.cfg_task.name == "rj45_insert":
@@ -883,9 +890,12 @@ class FactoryEnv(DirectRLEnv):
         curr_engaged = self._get_curr_successes(success_threshold=self.cfg_task.engage_threshold, check_rot=False)
 
         rew_dict = {
-            "kp_baseline": factory_utils.squashing_fn(keypoint_dist, a0, b0),
-            "kp_coarse": factory_utils.squashing_fn(keypoint_dist, a1, b1),
-            "kp_fine": factory_utils.squashing_fn(keypoint_dist, a2, b2),
+            # "kp_baseline": factory_utils.squashing_fn(keypoint_dist, a0, b0),
+            # "kp_coarse": factory_utils.squashing_fn(keypoint_dist, a1, b1),
+            # "kp_fine": factory_utils.squashing_fn(keypoint_dist, a2, b2),
+            "kp_baseline": factory_utils.squashing_fn(frame_dist, a0, b0),
+            "kp_coarse": factory_utils.squashing_fn(frame_dist, a1, b1),
+            "kp_fine": factory_utils.squashing_fn(frame_dist, a2, b2),
             "action_penalty_ee": action_penalty_ee,
             "action_grad_penalty": action_grad_penalty,
             "curr_engaged": curr_engaged.float(),

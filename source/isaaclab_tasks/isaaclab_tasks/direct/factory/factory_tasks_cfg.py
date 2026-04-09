@@ -79,6 +79,10 @@ class FactoryTask:
     keypoint_coef_baseline: list = [5, 4]  # General movement towards fixed object.
     keypoint_coef_coarse: list = [50, 2]  # Movement to align the assets.
     keypoint_coef_fine: list = [100, 0]  # Smaller distances for threading or last-inch insertion.
+    # Weight for rotation error in frame_dist = keypoint_dist + rot_weight * rot_dist.
+    # rot_dist is the geodesic angle (rad) between held and fixed asset orientations.
+    # 0.0 disables rotation term (pure XYZ keypoint reward).
+    rot_weight: float = 0.0
     # Fixed-asset height fraction for which different bonuses are rewarded (see individual tasks).
     success_threshold: float = 0.04
     engage_threshold: float = 0.9

@@ -200,6 +200,21 @@ def squashing_fn(x, a, b):
     return 1 / (torch.exp(a * x) + b + torch.exp(-a * x))
 
 
+def quat_rpy_dist(q_held, q_fixed):
+    """L2 norm of the RPY error of held relative to fixed, shape (N,).
+
+    Computes q_rel = q_fixed^{-1} * q_held (relative rotation in fixed frame),
+    converts to euler angles (roll, pitch, yaw), and returns the L2 norm.
+    At success q_rel → identity → all euler angles → 0 → dist → 0.
+    """
+    import isaacsim.core.utils.torch as _torch_utils
+    # Unit quaternion inverse = conjugate: (w, -x, -y, -z)
+    q_fixed_inv = q_fixed * torch.tensor([1.0, -1.0, -1.0, -1.0], device=q_fixed.device)
+    q_rel = _torch_utils.quat_mul(q_fixed_inv, q_held)
+    roll, pitch, yaw = _torch_utils.get_euler_xyz(q_rel)
+    return torch.sqrt(roll ** 2 + pitch ** 2 + yaw ** 2)
+
+
 def collapse_obs_dict(obs_dict, obs_order):
     """Stack observations in given order."""
     obs_tensors = [obs_dict[obs_name] for obs_name in obs_order]
