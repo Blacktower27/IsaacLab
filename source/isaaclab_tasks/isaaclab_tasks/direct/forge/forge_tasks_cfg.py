@@ -484,6 +484,13 @@ class ForgeRJ45Insert(ForgeTask):
     held_asset_rot_offset: list = [0.0, 0.0, 0.0]  # [roll, pitch, yaw] deg
     held_asset_pos_offset: list = [0.0, 0.0, -0.06]
 
+    # --- Trajectory imitation reward ---
+    # Path to JSON file with reference trajectories (collected by collect_rj45_trajectories.py).
+    # Set to "" to disable the imitation reward entirely.
+    ref_traj_json: str = "scripts/rj45_ref_traj.json"
+    imitation_rwd_scale: float = 1.0
+    num_point_robot_traj: int = 10  # rolling window of recent held-tip positions
+
     # --- Reward shaping ---
     contact_penalty_scale: float = 0.05
     # contact_penalty_scale: float = 0.05

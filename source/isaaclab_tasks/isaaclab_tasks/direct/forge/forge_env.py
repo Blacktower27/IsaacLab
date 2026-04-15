@@ -2,6 +2,9 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+import json
+import os
+
 import numpy as np
 import torch
 
@@ -9,11 +12,14 @@ import isaacsim.core.utils.torch as torch_utils
 
 from isaaclab.utils.math import axis_angle_from_quat, quat_apply_inverse
 
+from isaaclab_tasks.direct.automate import automate_algo_utils as automate_algo
 from isaaclab_tasks.direct.factory import factory_utils
 from isaaclab_tasks.direct.factory.factory_env import FactoryEnv
 
 from . import forge_utils
 from .forge_env_cfg import ForgeEnvCfg
+
+_TIP_OFFSET_LOCAL = [0.0, 0.0, -0.003]
 
 
 class ForgeEnv(FactoryEnv):
@@ -22,6 +28,8 @@ class ForgeEnv(FactoryEnv):
     def __init__(self, cfg: ForgeEnvCfg, render_mode: str | None = None, **kwargs):
         """Initialize additional randomization and logging tensors."""
         super().__init__(cfg, render_mode, **kwargs)
+
+        self._init_imitation_reward()
 
         # Success prediction.
         self.success_pred_scale = 0.0
@@ -55,6 +63,78 @@ class ForgeEnv(FactoryEnv):
 
         self.pos_threshold = self.default_pos_threshold.clone()
         self.rot_threshold = self.default_rot_threshold.clone()
+
+    # ------------------------------------------------------------------
+    # Trajectory imitation reward
+    # ------------------------------------------------------------------
+    def _init_imitation_reward(self):
+        """Load reference trajectories and allocate rolling buffer."""
+        ref_path = getattr(self.cfg_task, "ref_traj_json", "")
+        if not ref_path:
+            self.use_imitation_reward = False
+            return
+
+        if not os.path.isabs(ref_path):
+            ref_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", ref_path)
+        ref_path = os.path.normpath(ref_path)
+
+        if not os.path.isfile(ref_path):
+            print(f"[ForgeEnv] WARNING: ref_traj_json not found at {ref_path}, disabling imitation reward.")
+            self.use_imitation_reward = False
+            return
+
+        with open(ref_path) as f:
+            raw = json.load(f)
+
+        traj_list = []
+        for entry in raw:
+            pts = np.asarray(entry["held_tip_local"], dtype=np.float32).reshape(-1, 3)
+            traj_list.append(pts)
+
+        traj_lens = [len(t) for t in traj_list]
+        max_len = max(traj_lens)
+        for i, t in enumerate(traj_list):
+            if len(t) < max_len:
+                traj_list[i] = np.concatenate([t, np.tile(t[-1:], (max_len - len(t), 1))], axis=0)
+
+        self.ref_traj = torch.tensor(
+            np.stack(traj_list, axis=0), dtype=torch.float32, device=self.device
+        )  # (num_trajs, traj_len, 3)
+
+        self.use_imitation_reward = True
+        print(
+            f"[ForgeEnv] Imitation reward enabled: {len(raw)} trajectories, "
+            f"traj_len={self.ref_traj.shape[1]}"
+        )
+
+    def _get_held_tip_local(self):
+        """Compute held asset tip position in socket local frame.
+
+        Returns (num_envs, 3) tensor.
+        """
+        tip_offset = torch.tensor(
+            _TIP_OFFSET_LOCAL, device=self.device, dtype=torch.float32
+        ).unsqueeze(0).expand(self.num_envs, -1)
+        tip_world = self.held_pos + torch_utils.quat_rotate(self.held_quat, tip_offset)
+        delta_w = tip_world - self.fixed_pos
+        return quat_apply_inverse(self.fixed_quat, delta_w)
+
+    def _compute_imitation_reward(self, curr_tip_local):
+        """Vectorised closest-point imitation reward (no DTW, no Python loops).
+
+        For each env, finds the closest point on any reference trajectory,
+        then rewards proximity weighted by forward progress along the trajectory.
+        """
+        ref_traj = self.ref_traj  # (T, L, 3)
+        L = ref_traj.shape[1]
+
+        _, min_step_idx, min_dist = automate_algo.get_closest_state_idx(
+            ref_traj, curr_tip_local,
+        )
+
+        closeness = torch.exp(-min_dist / 0.01)
+        w_progress = 1.0 - min_step_idx.float() / L
+        return closeness * w_progress
 
     def _compute_intermediate_values(self, dt):
         """Add noise to observations for force sensing."""
@@ -319,6 +399,12 @@ class ForgeEnv(FactoryEnv):
             "contact_penalty": -self.cfg_task.contact_penalty_scale,
             "success_pred_error": -self.success_pred_scale,
         }
+
+        if self.use_imitation_reward:
+            curr_tip_local = self._get_held_tip_local()
+            rew_dict["imitation"] = self._compute_imitation_reward(curr_tip_local)
+            rew_scales["imitation"] = self.cfg_task.imitation_rwd_scale
+
         for rew_name, rew in rew_dict.items():
             rew_buf += rew_dict[rew_name] * rew_scales[rew_name]
 

@@ -48,8 +48,21 @@ STL_MALE = os.path.join(
     "source/isaaclab_assets/isaaclab_assets/custom_assets/rj45/medium/rs_male_rj45.stl",
 )
 
-# RJ45 geometry constant (from forge_tasks_cfg.py init_state pos.z = |STL Z_min|)
-_FEMALE_BOTTOM_Z = 0.05145  # socket bottom flush with table; opening face = socket USD origin
+# RJ45 geometry constants (all values from forge_tasks_cfg.py / factory_utils.py)
+_FEMALE_BOTTOM_Z = 0.05145   # socket USD origin world Z (= |STL Z_min|); opening face at top
+
+# Full-insertion target from forge_tasks_cfg.py (single source of truth)
+_SOCKET_TARGET_Y_LOCAL = -0.006  # socket_target_y_local: cavity centre Y offset from socket USD
+_SOCKET_TARGET_Z_LOCAL =  0.014  # socket_target_z_local: held-base (tip) Z in socket-local frame
+_MALE_TIP_OFFSET       = -0.003  # RJ45MaleCfg.base_height: tip 3 mm below male USD origin
+
+# Male USD origin world Z at full insertion (visualization):
+#   We show the plug 35 mm inside the socket cavity for a clear visual insertion.
+#     tip_world  = _FEMALE_BOTTOM_Z - 0.035 = 0.05145 - 0.035 = 0.01645 m
+#     male_origin = tip_world - _MALE_TIP_OFFSET = 0.01645 + 0.003 = 0.01945 m
+#   → 35 mm of tip inside socket body → unmistakably inserted.
+_MALE_USD_TARGET_Z = _FEMALE_BOTTOM_Z - 0.035 + abs(_MALE_TIP_OFFSET)
+# = 0.05145 - 0.035 + 0.003 = 0.01945 m  (tip at 0.01645 m = 35 mm inside socket)
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +81,14 @@ class PoseParams:
 @dataclass
 class TrajectoryConfig:
     """Parameters controlling trajectory shape and sampling."""
-    approach_z_offset: float = 0.050  # m above socket z before vertical descent
+    # Contact-init: tip aligned with socket opening face.
+    #   Z_start ≈ _FEMALE_BOTTOM_Z + |_MALE_TIP_OFFSET| = 0.05145 + 0.003 = 0.054 m
+    # Male target Z = _MALE_USD_TARGET_Z ≈ 0.019 m  (tip 35 mm inside socket)
+    # approach_z_offset chosen so approach.z ≈ Z_start:
+    #   approach.z = 0.019 + 0.035 = 0.054 m  ← matches contact-init Z
+    # Phase-1 (arc, blue):  XY/yaw alignment at constant Z ≈ socket-opening level
+    # Phase-2 (descent, orange): straight 35 mm downward into socket cavity
+    approach_z_offset: float = 0.035  # m above male target z before vertical descent
     n_intermediate_frames: int = 10   # coord frames at intermediate waypoints
     n_phase1_pts: int = 60            # spline resolution – arc phase
     n_phase2_pts: int = 25            # resolution – vertical descent phase
@@ -80,8 +100,8 @@ class RenderConfig:
     stl_scale: float = 0.001          # STL files are in mm → convert to metres
     alpha_stl: float = 0.30           # mesh transparency
     alpha_stl_start: float = 0.20     # slightly more transparent for start ghost
-    view_elev: float = 25.0           # 3D camera elevation (degrees)
-    view_azim: float = -60.0          # 3D camera azimuth (degrees)
+    view_elev: float = 20.0           # 3D camera elevation (degrees)
+    view_azim: float = -90.0          # look along X axis → Y-Z plane shows Y insertion
     frame_len: float = 0.012          # coordinate axis arrow length (m)
     frame_alpha: float = 0.9
     fig_dpi: int = 120
@@ -89,14 +109,44 @@ class RenderConfig:
     traj_lw: float = 1.6              # trajectory line width
 
 
+# [OLD] Generic random-offset start sampling — replaced by contact-init geometry below.
+# @dataclass
+# class StartRangeConfig:
+#     """Random start-pose tolerance around the target."""
+#     dx_range: float = 0.060           # ±m in X
+#     dy_range: float = 0.060           # ±m in Y
+#     dz_min: float = 0.101             # m above target z (minimum)
+#     dz_max: float = 0.181             # m above target z (maximum)
+#     dyaw_range: float = 0.524         # ±rad (≈ ±30°)
+
+
 @dataclass
-class StartRangeConfig:
-    """Random start-pose tolerance around the target."""
-    dx_range: float = 0.060           # ±m in X
-    dy_range: float = 0.060           # ±m in Y
-    dz_min: float = 0.101             # m above target z (minimum)
-    dz_max: float = 0.181             # m above target z (maximum)
-    dyaw_range: float = 0.524         # ±rad (≈ ±30°)
+class ContactInitConfig:
+    """Contact-init parameters mirroring forge_tasks_cfg.py → RJ45Insert.
+
+    The contact-init algorithm places the male plug so that a point on its
+    *bottom patch* (in male-local frame) coincides with a point on the female
+    socket's *rear edge* (in female-local frame).
+
+    Female-local frame origin = socket USD origin = socket opening face.
+    Male-local frame origin   = male USD origin   = connector mating face.
+    """
+    # Female socket rear-edge contact region (female-local frame, metres)
+    female_rear_edge_x_range_local: Tuple[float, float] = (-0.020, 0.020)
+    female_rear_edge_y_local: float = -0.0186   # rear wall Y inside socket
+    female_rear_edge_z_local: float = 0.0       # at socket opening face
+
+    # Male plug bottom-patch contact region (male-local frame, metres)
+    # Use physical TIP offset (= RJ45MaleCfg.base_height = -0.003) so the contact-init
+    # position shows the connector tip aligned with the socket opening face.
+    # (Sim uses -0.060 as a virtual approach-distance control point; for visualization
+    # the tip is the natural physical contact reference.)
+    male_bottom_patch_x_range_local: Tuple[float, float] = (-0.018, 0.018)
+    male_bottom_patch_y_range_local: Tuple[float, float] = (-0.006, 0.009)
+    male_bottom_patch_z_local: float = _MALE_TIP_OFFSET  # -0.003: physical connector tip
+
+    # Orientation noise around the female socket's yaw (degrees)
+    contact_init_yaw_range_deg: Tuple[float, float] = (-10.0, 10.0)
 
 
 @dataclass
@@ -162,31 +212,69 @@ def apply_pose_to_mesh(vertices: np.ndarray, pose: PoseParams) -> np.ndarray:
 # 4. Start-pose sampling
 # ---------------------------------------------------------------------------
 
-def sample_start_pose(
+# [OLD] Generic random-offset sampling — replaced by sample_contact_init_pose.
+# def sample_start_pose(
+#     target: PoseParams,
+#     ranges: StartRangeConfig,
+#     rng: np.random.Generator,
+# ) -> PoseParams:
+#     dx = rng.uniform(-ranges.dx_range, ranges.dx_range)
+#     dy = rng.uniform(-ranges.dy_range, ranges.dy_range)
+#     dz = rng.uniform(ranges.dz_min, ranges.dz_max)
+#     dyaw = rng.uniform(-ranges.dyaw_range, ranges.dyaw_range)
+#     return PoseParams(
+#         x=target.x + dx,
+#         y=target.y + dy,
+#         z=target.z + dz,
+#         yaw=target.yaw + dyaw,
+#     )
+
+
+def sample_contact_init_pose(
     target: PoseParams,
-    ranges: StartRangeConfig,
+    cfg: ContactInitConfig,
     rng: np.random.Generator,
 ) -> PoseParams:
-    """Sample a random start pose offset from *target*.
+    """Sample a male-plug start pose using the same contact-init geometry as the sim.
+
+    Replicates forge_env.py's contact-init logic (lines ~1296-1340):
+
+        female_point_world = R(target.yaw) * female_rear_edge_local + target.xyz
+        held_contact_pos   = female_point_world - R(yaw) * male_bottom_patch_local
+
+    where *target* is the female socket world pose (USD origin = socket opening face).
 
     Args:
-        target: Target (final) pose.
-        ranges: Tolerance ranges for the random offset.
-        rng:    Seeded random generator for reproducibility.
+        target: Female socket world pose — also the male plug pose at full insertion.
+        cfg:    ContactInitConfig with ranges matching forge_tasks_cfg.py.
+        rng:    Seeded RNG for reproducibility.
 
     Returns:
-        PoseParams representing the sampled start pose.
+        PoseParams for the male plug USD origin at contact-init.
     """
-    dx = rng.uniform(-ranges.dx_range, ranges.dx_range)
-    dy = rng.uniform(-ranges.dy_range, ranges.dy_range)
-    dz = rng.uniform(ranges.dz_min, ranges.dz_max)
-    dyaw = rng.uniform(-ranges.dyaw_range, ranges.dyaw_range)
-    return PoseParams(
-        x=target.x + dx,
-        y=target.y + dy,
-        z=target.z + dz,
-        yaw=target.yaw + dyaw,
-    )
+    # 1. Sample relative yaw of held plug w.r.t. female socket
+    yaw = rng.uniform(*np.deg2rad(cfg.contact_init_yaw_range_deg))
+
+    # 2. Female rear-edge contact point in female-local frame → world frame
+    fx = rng.uniform(*cfg.female_rear_edge_x_range_local)
+    fy = cfg.female_rear_edge_y_local
+    fz = cfg.female_rear_edge_z_local
+    R_fem = _yaw_rotation_matrix(target.yaw)   # female socket orientation
+    female_world = R_fem @ np.array([fx, fy, fz]) + np.array([target.x, target.y, target.z])
+
+    # 3. Male bottom-patch contact point in male-local frame
+    mx = rng.uniform(*cfg.male_bottom_patch_x_range_local)
+    my = rng.uniform(*cfg.male_bottom_patch_y_range_local)
+    mz = cfg.male_bottom_patch_z_local          # = -0.060 m
+    male_local = np.array([mx, my, mz])
+
+    # 4. Male USD origin = female contact point minus rotated male contact offset
+    #    held_contact_pos = female_world - R(yaw) * male_local
+    R_held = _yaw_rotation_matrix(yaw)
+    held_pos = female_world - R_held @ male_local
+
+    return PoseParams(x=float(held_pos[0]), y=float(held_pos[1]),
+                      z=float(held_pos[2]), yaw=float(yaw))
 
 
 # ---------------------------------------------------------------------------
@@ -316,8 +404,9 @@ def draw_coord_frame(
 
 def plot_single_trajectory(
     seed: int,
-    target: PoseParams,
-    start_ranges: StartRangeConfig,
+    female_pose: PoseParams,
+    male_target: PoseParams,
+    contact_init_cfg: ContactInitConfig,
     traj_cfg: TrajectoryConfig,
     render_cfg: RenderConfig,
     male_verts: np.ndarray,
@@ -326,20 +415,23 @@ def plot_single_trajectory(
     """Create one 3D matplotlib figure for a single seeded trajectory.
 
     Args:
-        seed:         Integer seed (determines start pose deterministically).
-        target:       Target insertion pose (fixed, world-origin by default).
-        start_ranges: Sampling tolerances for random start pose.
-        traj_cfg:     Trajectory generation config.
-        render_cfg:   Rendering/visual config.
-        male_verts:   (N,3,3) raw vertices of the male plug (local frame, metres).
-        female_verts: (N,3,3) raw vertices of the female socket (local frame, metres).
+        seed:             Integer seed (determines start pose deterministically).
+        female_pose:      Female socket world pose (USD origin = socket opening face).
+                          Used for socket rendering and contact-init sampling reference.
+        male_target:      Male plug world pose at full insertion (USD origin).
+                          Derived from factory_utils.get_target_held_base_pose.
+        contact_init_cfg: Contact-init geometry config (mirrors forge_tasks_cfg.py).
+        traj_cfg:         Trajectory generation config.
+        render_cfg:       Rendering/visual config.
+        male_verts:       (N,3,3) raw vertices of the male plug (local frame, metres).
+        female_verts:     (N,3,3) raw vertices of the female socket (local frame, metres).
 
     Returns:
         matplotlib Figure.
     """
     rng = np.random.default_rng(seed)
-    start = sample_start_pose(target, start_ranges, rng)
-    traj = generate_trajectory(start, target, traj_cfg)
+    start = sample_contact_init_pose(female_pose, contact_init_cfg, rng)
+    traj = generate_trajectory(start, male_target, traj_cfg)
     frame_poses = select_frame_waypoints(traj, traj_cfg.n_intermediate_frames)
 
     fig = plt.figure(figsize=render_cfg.fig_size, dpi=render_cfg.fig_dpi)
@@ -362,16 +454,16 @@ def plot_single_trajectory(
         draw_coord_frame(ax, pose, length, alpha=render_cfg.frame_alpha)
 
     # ---- STL meshes ---------------------------------------------------------
-    # Female socket at target: origins overlap → both USD origins at same world position.
-    # Socket body Z ∈ [0, _FEMALE_BOTTOM_Z], plug tip 3 mm below origin = just inside socket.
-    fv = apply_pose_to_mesh(female_verts, target)
+    # Female socket: placed at female_pose (USD origin = socket opening face).
+    # Socket body Z ∈ [0, _FEMALE_BOTTOM_Z] (bottom flush with table).
+    fv = apply_pose_to_mesh(female_verts, female_pose)
     poly_female = Poly3DCollection(
         fv, alpha=render_cfg.alpha_stl,
         facecolor="mediumseagreen", edgecolor="none",
     )
     ax.add_collection3d(poly_female)
 
-    # Male plug ghost at START (red/salmon)
+    # Male plug ghost at START / contact-init pose (red/salmon)
     mv_start = apply_pose_to_mesh(male_verts, start)
     poly_male_start = Poly3DCollection(
         mv_start, alpha=render_cfg.alpha_stl_start,
@@ -379,8 +471,10 @@ def plot_single_trajectory(
     )
     ax.add_collection3d(poly_male_start)
 
-    # Male plug ghost at TARGET / inserted (steel-blue)
-    mv_target = apply_pose_to_mesh(male_verts, target)
+    # Male plug ghost at TARGET / full insertion (steel-blue)
+    # male_target = USD origin at (_SOCKET_TARGET_Y_LOCAL, _MALE_USD_TARGET_Z)
+    # Connector tip (3 mm below USD origin) is at the sim success position.
+    mv_target = apply_pose_to_mesh(male_verts, male_target)
     poly_male_target = Poly3DCollection(
         mv_target, alpha=render_cfg.alpha_stl,
         facecolor="steelblue", edgecolor="none",
@@ -390,6 +484,7 @@ def plot_single_trajectory(
     # ---- Axis limits (equal aspect, z always starts at 0 = table level) -----
     all_pts = np.vstack([
         mv_start.reshape(-1, 3),
+        mv_target.reshape(-1, 3),
         fv.reshape(-1, 3),
         np.array([[p.x, p.y, p.z] for p in traj]),
     ])
@@ -397,7 +492,7 @@ def plot_single_trajectory(
     half_range = np.max(np.abs(all_pts - centre)) * 1.15
     ax.set_xlim(centre[0] - half_range, centre[0] + half_range)
     ax.set_ylim(centre[1] - half_range, centre[1] + half_range)
-    ax.set_zlim(0.0, centre[2] + half_range)  # floor at z=0
+    ax.set_zlim(-0.010, centre[2] + half_range)  # -10 mm shows floor below socket
 
     # ---- Table surface (z=0 reference plane) --------------------------------
     _r = half_range * 0.8
@@ -405,7 +500,8 @@ def plot_single_trajectory(
     _tx, _ty = np.meshgrid(
         [_cx - _r, _cx + _r], [_cy - _r, _cy + _r]
     )
-    ax.plot_surface(_tx, _ty, np.zeros_like(_tx),
+    # Floor at Z = -0.002 (2 mm below socket bottom) so socket visually rests on table.
+    ax.plot_surface(_tx, _ty, np.full_like(_tx, -0.002),
                     alpha=0.08, color="saddlebrown", linewidth=0, zorder=0)
 
     # ---- Labels and view ----------------------------------------------------
@@ -426,8 +522,9 @@ def plot_single_trajectory(
 # ---------------------------------------------------------------------------
 
 def generate_all_figures(
-    target: PoseParams,
-    start_ranges: StartRangeConfig,
+    female_pose: PoseParams,
+    male_target: PoseParams,
+    contact_init_cfg: ContactInitConfig,
     traj_cfg: TrajectoryConfig,
     render_cfg: RenderConfig,
     batch_cfg: BatchConfig,
@@ -438,7 +535,9 @@ def generate_all_figures(
     """Generate one figure per trajectory seed.
 
     Args:
-        seed_offset: Added to each seed index (useful for generating new batches).
+        female_pose:  Female socket world pose (USD origin).
+        male_target:  Male plug world pose at full insertion (USD origin).
+        seed_offset:  Added to each seed index (useful for generating new batches).
 
     Returns:
         List of matplotlib Figures, length = batch_cfg.n_trajectories.
@@ -447,7 +546,8 @@ def generate_all_figures(
     for i in range(batch_cfg.n_trajectories):
         seed = seed_offset + i
         fig = plot_single_trajectory(
-            seed, target, start_ranges, traj_cfg, render_cfg, male_verts, female_verts
+            seed, female_pose, male_target, contact_init_cfg,
+            traj_cfg, render_cfg, male_verts, female_verts,
         )
         figures.append(fig)
         print(f"  Rendered seed {seed} ({i + 1}/{batch_cfg.n_trajectories})", flush=True)
@@ -540,9 +640,21 @@ def main() -> None:
     args = parser.parse_args()
 
     # --- Config ---------------------------------------------------------------
-    # Origins overlap at full insertion: male USD origin = female USD origin = socket opening face.
-    target_pose = PoseParams(x=0.0, y=0.0, z=_FEMALE_BOTTOM_Z, yaw=0.0)
-    start_ranges = StartRangeConfig()
+    # female_pose: female socket USD origin in world frame.
+    #   Socket body Z ∈ [0, _FEMALE_BOTTOM_Z] (bottom flush with table).
+    female_pose = PoseParams(x=0.0, y=0.0, z=_FEMALE_BOTTOM_Z, yaw=0.0)
+
+    # male_target: male plug USD origin at full insertion (visualization).
+    #   tip_world  = _FEMALE_BOTTOM_Z - 0.035 = 0.01645 m (35 mm inside socket cavity)
+    #   USD_origin = tip_world + 0.003 = 0.01945 m
+    male_target = PoseParams(
+        x=0.0,
+        y=_SOCKET_TARGET_Y_LOCAL,      # = -0.006 m
+        z=_MALE_USD_TARGET_Z,          # = 0.01945 m (tip 35 mm inside socket)
+        yaw=0.0,
+    )
+
+    contact_init_cfg = ContactInitConfig()   # matches forge_tasks_cfg.py → RJ45Insert
     traj_cfg = TrajectoryConfig()
     render_cfg = RenderConfig()
     batch_cfg = BatchConfig(n_trajectories=args.n_trajectories)
@@ -563,7 +675,7 @@ def main() -> None:
     # --- Generate figures -----------------------------------------------------
     print(f"Generating {batch_cfg.n_trajectories} trajectory figures …")
     figures = generate_all_figures(
-        target_pose, start_ranges, traj_cfg, render_cfg, batch_cfg,
+        female_pose, male_target, contact_init_cfg, traj_cfg, render_cfg, batch_cfg,
         male_verts, female_verts,
         seed_offset=args.seed_offset,
     )
