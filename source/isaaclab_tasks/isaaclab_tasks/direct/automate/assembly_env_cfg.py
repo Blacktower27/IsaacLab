@@ -12,7 +12,7 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 
-from .assembly_tasks_cfg import ASSET_DIR, Insertion
+from .assembly_tasks_cfg import ASSET_DIR, BNCSmallInsertion, BoxLidInsertion, Insertion, RJ45Insertion
 
 OBS_DIM_CFG = {
     "joint_pos": 7,
@@ -95,6 +95,11 @@ class AssemblyEnvCfg(DirectRLEnvCfg):
         "held_quat",
         "delta_pos",
     ]
+
+    # Stack last N policy steps into policy/critic inputs (each step includes prev_actions), matching Factory/Forge.
+    # Single-step observations use obs_window_size=1 / state_window_size=1.
+    obs_window_size: int = 1
+    state_window_size: int = 1
 
     task_name: str = "insertion"  # peg_insertion, gear_meshing, nut_threading
     tasks: dict = {"insertion": Insertion()}
@@ -198,3 +203,33 @@ class AssemblyEnvCfg(DirectRLEnvCfg):
     # contact_sensor: ContactSensorCfg = ContactSensorCfg(
     #     prim_path="/World/envs/env_.*/Robot/.*", update_period=0.0, history_length=1, debug_vis=True
     # )
+
+
+@configclass
+class BoxLidInsertEnvCfg(AssemblyEnvCfg):
+    task_name: str = "box_lid_insert"
+    tasks: dict = {"box_lid_insert": BoxLidInsertion()}
+    episode_length_s = 30.0
+    obs_window_size: int = 15
+    state_window_size: int = 15
+
+
+@configclass
+class RJ45InsertEnvCfg(AssemblyEnvCfg):
+    task_name: str = "rj45_insert"
+    tasks: dict = {"rj45_insert": RJ45Insertion()}
+    episode_length_s = 30.0
+    obs_window_size: int = 15
+    state_window_size: int = 15
+    # DTW imitation defaults: ``RJ45Insertion`` uses repo ``scripts/rj45_ref_traj_automate.json`` and
+    # ``imitation_rwd_scale=1.0``. Override with Hydra, e.g.
+    # ``++tasks.rj45_insert.disassembly_path_json=/path/to/your.json`` or ``++tasks.rj45_insert.imitation_rwd_scale=0.5``.
+
+
+@configclass
+class BNCSmallInsertEnvCfg(AssemblyEnvCfg):
+    task_name: str = "bnc_insert"
+    tasks: dict = {"bnc_insert": BNCSmallInsertion()}
+    episode_length_s = 30.0
+    obs_window_size: int = 15
+    state_window_size: int = 15

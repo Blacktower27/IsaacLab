@@ -31,3 +31,33 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
 )
+
+gym.register(
+    id="Isaac-AutoMate-BoxLidInsert-Direct-v0",
+    entry_point=f"{__name__}.assembly_env:AssemblyEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.assembly_env_cfg:BoxLidInsertEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-AutoMate-RJ45Insert-Direct-v0",
+    entry_point=f"{__name__}.assembly_env:AssemblyEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.assembly_env_cfg:RJ45InsertEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-AutoMate-BNCSmallInsert-Direct-v0",
+    entry_point=f"{__name__}.assembly_env:AssemblyEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.assembly_env_cfg:BNCSmallInsertEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+    },
+)

@@ -20,6 +20,8 @@ sys.path.append(base_dir)
 
 from isaaclab.utils.assets import retrieve_file_path
 
+import isaacsim.core.utils.torch as torch_utils
+
 """
 Util Functions
 """
@@ -160,6 +162,87 @@ def get_imitation_reward_from_dtw(ref_traj, curr_ee_pos, prev_ee_traj, criterion
     # imitation_rwd = torch.exp(-soft_dtw)
     imitation_rwd = 1 - torch.tanh(soft_dtw)
 
+    return imitation_rwd * w_task_progress
+
+
+def preprocess_reference_pose_trajectory(pose: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """Make reference pose trajectory start-relative: translate first position to origin; rotate quats by inv(q0).
+
+    Args:
+        pose: (T, 7) with positions (env frame) and quaternions (wxyz, world).
+
+    Returns:
+        (T, 7) with same layout; quaternions normalized and sign-fixed (qw >= 0).
+    """
+    p0 = pose[0, :3]
+    q0 = pose[0, 3:7]
+    q0 = q0 / (torch.norm(q0) + eps)
+    out = pose.clone()
+    out[:, :3] = pose[:, :3] - p0.unsqueeze(0)
+    q_inv = torch_utils.quat_conjugate(q0.unsqueeze(0)).expand(pose.shape[0], -1)
+    new_q = torch_utils.quat_mul(q_inv, pose[:, 3:7])
+    new_q = new_q / (torch.norm(new_q, dim=-1, keepdim=True) + eps)
+    sign = torch.where(new_q[:, 0:1] < 0, -1.0, 1.0)
+    out[:, 3:7] = new_q * sign
+    return out
+
+
+def embed_pose_for_dtw(pose_7: torch.Tensor, pos_w: float, rot_w: float, eps: float = 1e-12) -> torch.Tensor:
+    """Embed (x,y,z,qw,qx,qy,qz) for Euclidean Soft-DTW (same layout as input)."""
+    pos = pose_7[..., 0:3]
+    quat = pose_7[..., 3:7]
+    quat = quat / (quat.norm(dim=-1, keepdim=True) + eps)
+    sign = torch.where(quat[..., 0:1] < 0, -1.0, 1.0)
+    quat = quat * sign
+    return torch.cat([pos_w * pos, rot_w * quat], dim=-1)
+
+
+def get_imitation_reward_from_dtw_pose_traj(
+    ref_traj: torch.Tensor,
+    curr_pose: torch.Tensor,
+    prev_pose_traj: torch.Tensor,
+    criterion,
+    device,
+    pos_w: float = 1.0,
+    rot_w: float = 1.0,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Soft-DTW imitation on SE(3) poses stored as (x,y,z,qw,qx,qy,qz).
+
+    ref_traj: (num_traj, T, 7) start-relative (see preprocess_reference_pose_trajectory).
+    curr_pose: (B, 7) current EE pose in same convention as ref (goal-relative pos + quat rel to goal).
+    prev_pose_traj: (B, H, 7) rolling history.
+    Nearest-state / progress uses position only (same as xyz-only DTW).
+    """
+    assert ref_traj.ndim == 3 and ref_traj.shape[-1] == 7
+    assert curr_pose.shape[-1] == 7 and prev_pose_traj.shape[-1] == 7
+
+    ref_pos = ref_traj[:, :, 0:3]
+    soft_dtw = torch.zeros((curr_pose.shape[0]), device=device)
+    prev_pos = prev_pose_traj[:, 0, 0:3]
+    min_dist_traj_idx, min_dist_step_idx, _ = get_closest_state_idx(ref_pos, prev_pos)
+
+    for i in range(curr_pose.shape[0]):
+        traj_idx = min_dist_traj_idx[i]
+        step_idx = min_dist_step_idx[i]
+        curr_pose_i = curr_pose[i].reshape(1, 7)
+
+        traj_pos = ref_traj[traj_idx, step_idx:, 0:3].reshape((1, -1, 3))
+        _, curr_step_idx, _ = get_closest_state_idx(traj_pos, curr_pose_i[:, 0:3])
+
+        if curr_step_idx == 0:
+            selected_pose = ref_traj[traj_idx, step_idx].reshape(1, 1, 7)
+            selected_traj = torch.cat([selected_pose, selected_pose], dim=1)
+        else:
+            selected_traj = ref_traj[traj_idx, step_idx : (curr_step_idx + step_idx), :].reshape((1, -1, 7))
+        eef_traj = torch.cat((prev_pose_traj[i, 1:, :], curr_pose_i), dim=0).reshape((1, -1, 7))
+
+        eef_emb = embed_pose_for_dtw(eef_traj, pos_w, rot_w, eps)
+        ref_emb = embed_pose_for_dtw(selected_traj, pos_w, rot_w, eps)
+        soft_dtw[i] = criterion(eef_emb, ref_emb)
+
+    w_task_progress = 1.0 - (min_dist_step_idx.float() / ref_traj.shape[1])
+    imitation_rwd = 1.0 - torch.tanh(soft_dtw)
     return imitation_rwd * w_task_progress
 
 

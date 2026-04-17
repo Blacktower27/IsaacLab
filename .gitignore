@@ -65,6 +65,10 @@ _build
 # Teleop Recorded Dataset
 /datasets/
 
+# RL / imitation trajectory data (large JSON; regenerate locally, e.g. collect_rj45_trajectories.py)
+scripts/rj45_ref_traj*.json
+**/disassemble_traj.json
+
 # Tests
 tests/
 

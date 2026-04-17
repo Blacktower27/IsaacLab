@@ -10,9 +10,10 @@ no robot, no OSC, no gripper physics. Each trajectory has two phases:
 The held-asset tip position and RPY are recorded every sim step in the
 **socket (female) local frame**, matching Forge's coordinate conventions.
 
-Output format
--------------
-JSON list, one entry per trajectory::
+Output format (two files; no changes required inside Forge / Automate env code)
+-------------------------------------------------------------------------------
+
+**Forge / analysis** (``--output``)::
 
     [
       {
@@ -22,6 +23,26 @@ JSON list, one entry per trajectory::
       },
       ...
     ]
+
+**Automate DTW** (``--output_automate`` or auto path, unless ``--skip_automate_output``)::
+
+    [
+      {
+        "fingertip_centered_pos": [[x,y,z], ...],
+        "fingertip_centered_pose": [[x,y,z,qw,qx,qy,qz], ...],
+        "n_steps": N
+      },
+      ...
+    ]
+
+``fingertip_centered_pos`` / ``fingertip_centered_pose`` use the same convention as ``AssemblyEnv``:
+position is env frame (body position minus ``scene.env_origins``); quaternion is fingertip
+orientation in **world** (wxyz), matching ``preprocess_reference_pose_trajectory`` / pose DTW.
+``AssemblyEnv`` loads **pose** demos when ``fingertip_centered_pose`` is present; otherwise it
+uses position-only Soft-DTW on ``fingertip_centered_pos``. Rigid grasp: fingertip pose is computed
+from the teleported plug pose using the same ``held_asset_*`` offsets as
+``AssemblyEnv.get_handheld_asset_relative_pose`` for ``rj45_insert``, plus the Franka flip-Z chain
+used in Factory reset.
 
 Usage
 -----
@@ -40,6 +61,18 @@ parser = argparse.ArgumentParser(description="Collect RJ45 insertion reference t
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--num_trajectories", type=int, default=200)
 parser.add_argument("--output", type=str, default="scripts/rj45_ref_traj.json")
+parser.add_argument(
+    "--output_automate",
+    type=str,
+    default=None,
+    help="Automate DTW JSON path (fingertip_centered_pos + fingertip_centered_pose). Default: <output> with stem "
+         "suffix _automate before extension (e.g. rj45_ref_traj_automate.json).",
+)
+parser.add_argument(
+    "--skip_automate_output",
+    action="store_true",
+    help="If set, only write the Forge JSON (--output).",
+)
 parser.add_argument("--n_phase1", type=int, default=60,
                     help="Waypoints for Phase 1 (cubic spline arc).")
 parser.add_argument("--n_phase2", type=int, default=25,
@@ -77,6 +110,69 @@ from isaaclab_tasks.utils import parse_env_cfg
 # ── Geometry constants ────────────────────────────────────────────────────
 
 _TIP_OFFSET_LOCAL = np.array([0.0, 0.0, -0.003])  # male tip 3 mm below USD origin
+
+
+def _build_rj45_held_relative_tensors(task_cfg, device: torch.device, num_envs: int):
+    """Plug origin in fingertip(flipped) frame — matches AssemblyEnv.get_handheld_asset_relative_pose (rj45)."""
+    rc = task_cfg.robot_cfg
+    held_rel_pos = torch.zeros((num_envs, 3), device=device, dtype=torch.float32)
+    held_rel_pos[:, 2] = task_cfg.held_asset_cfg.height - rc.franka_fingerpad_length
+    pos_offset = torch.tensor(task_cfg.held_asset_pos_offset, device=device, dtype=torch.float32)
+    held_rel_pos = held_rel_pos + pos_offset.unsqueeze(0)
+
+    initial_rot_deg = task_cfg.held_asset_rot_init
+    rot_offset = getattr(task_cfg, "held_asset_rot_offset", [0.0, 0.0, 0.0])
+    rot_euler = torch.tensor(
+        [
+            rot_offset[0] * np.pi / 180.0,
+            rot_offset[1] * np.pi / 180.0,
+            (initial_rot_deg + rot_offset[2]) * np.pi / 180.0,
+        ],
+        device=device,
+        dtype=torch.float32,
+    ).unsqueeze(0).expand(num_envs, -1)
+    held_rel_quat = torch_utils.quat_from_euler_xyz(
+        roll=rot_euler[:, 0], pitch=rot_euler[:, 1], yaw=rot_euler[:, 2]
+    )
+    return held_rel_pos, held_rel_quat
+
+
+def _fingertip_pose_env_from_plug(
+    held_pos_w: torch.Tensor,
+    held_quat_w: torch.Tensor,
+    held_rel_pos: torch.Tensor,
+    held_rel_quat: torch.Tensor,
+    env_origins: torch.Tensor,
+) -> torch.Tensor:
+    """Fingertip pose for Automate: env-frame position (minus origins) + world wxyz quaternion."""
+    # T_ft_flipped = T_plug * T_held_rel  (inverse of Factory: plug = ft_flipped * inv(held_rel))
+    ft_flipped_q, ft_flipped_p = torch_utils.tf_combine(
+        held_quat_w,
+        held_pos_w,
+        held_rel_quat,
+        held_rel_pos,
+    )
+    flip_z = torch.tensor([0.0, 0.0, 1.0, 0.0], device=held_pos_w.device, dtype=torch.float32).unsqueeze(0).expand_as(
+        held_quat_w
+    )
+    zero = torch.zeros_like(held_pos_w)
+    flip_inv_q, flip_inv_p = torch_utils.tf_inverse(flip_z, zero)
+    ft_q, ft_p = torch_utils.tf_combine(ft_flipped_q, ft_flipped_p, flip_inv_q, flip_inv_p)
+    pos_env = ft_p - env_origins
+    return torch.cat([pos_env, ft_q], dim=-1)
+
+
+def _fingertip_pos_env_from_plug(
+    held_pos_w: torch.Tensor,
+    held_quat_w: torch.Tensor,
+    held_rel_pos: torch.Tensor,
+    held_rel_quat: torch.Tensor,
+    env_origins: torch.Tensor,
+) -> torch.Tensor:
+    """World fingertip midpoint position, minus env_origins (first 3 dims of :func:`_fingertip_pose_env_from_plug`)."""
+    return _fingertip_pose_env_from_plug(
+        held_pos_w, held_quat_w, held_rel_pos, held_rel_quat, env_origins
+    )[:, :3]
 
 
 # ── Trajectory generation (mirrors visualize_rj45_trajectory.py) ─────────
@@ -203,8 +299,11 @@ def main():
 
     env.reset()
 
+    held_rel_pos, held_rel_quat = _build_rj45_held_relative_tensors(env_cfg.task, device, num_envs)
+
     rng = np.random.default_rng(args_cli.seed)
     collected: list[dict] = []
+    collected_automate: list[dict] = []
     n_waypoints = args_cli.n_phase1 + args_cli.n_phase2 - 1
 
     print(
@@ -234,8 +333,10 @@ def main():
         batch_trajs = all_trajs[traj_idx : traj_idx + batch_size]
 
         # Per-env trajectory storage (socket local frame).
-        env_tip_local  = [[] for _ in range(batch_size)]
-        env_rpy_local  = [[] for _ in range(batch_size)]
+        env_tip_local = [[] for _ in range(batch_size)]
+        env_rpy_local = [[] for _ in range(batch_size)]
+        env_ft_automate = [[] for _ in range(batch_size)]
+        env_ft_pose_automate = [[] for _ in range(batch_size)]
 
         # Step through waypoints.
         for wi in range(n_waypoints):
@@ -303,9 +404,19 @@ def main():
             rel_roll, rel_pitch, rel_yaw = euler_xyz_from_quat(rel_quat)
             rpy_local = torch.stack([rel_roll, rel_pitch, rel_yaw], dim=-1)
 
+            ft_pose_env = _fingertip_pose_env_from_plug(
+                held_pos,
+                held_quat,
+                held_rel_pos,
+                held_rel_quat,
+                inner.scene.env_origins,
+            )
+
             for ei in range(batch_size):
                 env_tip_local[ei].append(tip_local[ei].cpu().numpy().tolist())
                 env_rpy_local[ei].append(rpy_local[ei].cpu().numpy().tolist())
+                env_ft_automate[ei].append(ft_pose_env[ei, :3].cpu().numpy().tolist())
+                env_ft_pose_automate[ei].append(ft_pose_env[ei].cpu().numpy().tolist())
 
         # Flush batch.
         for ei in range(batch_size):
@@ -314,6 +425,12 @@ def main():
                 "held_rpy_local": env_rpy_local[ei],
                 "n_steps": len(env_tip_local[ei]),
             })
+            if not args_cli.skip_automate_output:
+                collected_automate.append({
+                    "fingertip_centered_pos": env_ft_automate[ei],
+                    "fingertip_centered_pose": env_ft_pose_automate[ei],
+                    "n_steps": len(env_ft_automate[ei]),
+                })
 
         traj_idx += batch_size
         print(
@@ -323,27 +440,50 @@ def main():
     env.close()
 
     # ── Save ──────────────────────────────────────────────────────────────
-    output_path = args_cli.output
-    if not os.path.isabs(output_path):
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        output_path = os.path.join(repo_root, output_path)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    def _resolve_path(p: str) -> str:
+        if not os.path.isabs(p):
+            return os.path.join(repo_root, p)
+        return p
+
+    output_path = _resolve_path(args_cli.output)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     with open(output_path, "w") as f:
         json.dump(collected, f, indent=2)
 
+    automate_path = None
+    if not args_cli.skip_automate_output and collected_automate:
+        if args_cli.output_automate:
+            automate_path = _resolve_path(args_cli.output_automate)
+        else:
+            d, base = os.path.split(output_path)
+            stem, ext = os.path.splitext(base)
+            automate_path = os.path.join(d, f"{stem}_automate{ext}")
+        os.makedirs(os.path.dirname(automate_path) or ".", exist_ok=True)
+        with open(automate_path, "w") as f:
+            json.dump(collected_automate, f, indent=2)
+
     final_z = [t["held_tip_local"][-1][2] for t in collected]
     start_z = [t["held_tip_local"][0][2] for t in collected]
     final_yaw = [abs(t["held_rpy_local"][-1][2]) for t in collected]
-    print(
+    msg = (
         f"\n{'='*60}\n"
-        f"[collect] Saved {len(collected)} trajectories → {output_path}\n"
+        f"[collect] Forge: saved {len(collected)} trajectories → {output_path}\n"
+    )
+    if automate_path:
+        msg += f"[collect] Automate DTW: saved {len(collected_automate)} trajectories → {automate_path}\n"
+    elif args_cli.skip_automate_output:
+        msg += "[collect] Automate DTW: skipped (--skip_automate_output)\n"
+    msg += (
         f"[collect] Start tip Z: min={min(start_z):.4f}, max={max(start_z):.4f} m\n"
         f"[collect] Final tip Z: min={min(final_z):.4f}, max={max(final_z):.4f} m\n"
         f"[collect] Final |yaw|: min={min(final_yaw):.4f}, max={max(final_yaw):.4f} rad\n"
         f"[collect] RPY at endpoint should be [0, 0, 0] (aligned with socket)\n"
         f"{'='*60}"
     )
+    print(msg)
 
 
 if __name__ == "__main__":
