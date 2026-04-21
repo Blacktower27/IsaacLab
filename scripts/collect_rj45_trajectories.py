@@ -19,6 +19,7 @@ Output format (two files; no changes required inside Forge / Automate env code)
       {
         "held_tip_local": [[x,y,z], ...],
         "held_rpy_local": [[r,p,y], ...],
+        "held_tip_pose_local": [[x,y,z,qw,qx,qy,qz], ...],  # socket frame; for pose Soft-DTW in ForgeEnv
         "n_steps": N
       },
       ...
@@ -335,6 +336,7 @@ def main():
         # Per-env trajectory storage (socket local frame).
         env_tip_local = [[] for _ in range(batch_size)]
         env_rpy_local = [[] for _ in range(batch_size)]
+        env_pose7_local = [[] for _ in range(batch_size)]
         env_ft_automate = [[] for _ in range(batch_size)]
         env_ft_pose_automate = [[] for _ in range(batch_size)]
 
@@ -415,6 +417,9 @@ def main():
             for ei in range(batch_size):
                 env_tip_local[ei].append(tip_local[ei].cpu().numpy().tolist())
                 env_rpy_local[ei].append(rpy_local[ei].cpu().numpy().tolist())
+                env_pose7_local[ei].append(
+                    torch.cat([tip_local[ei], rel_quat[ei]], dim=0).cpu().numpy().tolist()
+                )
                 env_ft_automate[ei].append(ft_pose_env[ei, :3].cpu().numpy().tolist())
                 env_ft_pose_automate[ei].append(ft_pose_env[ei].cpu().numpy().tolist())
 
@@ -423,6 +428,7 @@ def main():
             collected.append({
                 "held_tip_local": env_tip_local[ei],
                 "held_rpy_local": env_rpy_local[ei],
+                "held_tip_pose_local": env_pose7_local[ei],
                 "n_steps": len(env_tip_local[ei]),
             })
             if not args_cli.skip_automate_output:

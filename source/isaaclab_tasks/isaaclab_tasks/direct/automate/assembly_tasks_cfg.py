@@ -499,7 +499,7 @@ class RJ45Insertion(AssemblyTask):
 
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
     fixed_asset_init_orn_deg: float = 0.0
-    fixed_asset_init_orn_range_deg: float = 360.0
+    fixed_asset_init_orn_range_deg: float = 0.0
     fixed_asset_z_offset: float = 0.0
 
     held_asset_init_pos_noise: list = [0.0, 0.0, 0.0]

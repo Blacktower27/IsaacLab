@@ -13,6 +13,7 @@ import isaacsim.core.utils.torch as torch_utils
 from isaaclab.utils.math import axis_angle_from_quat, quat_apply_inverse
 
 from isaaclab_tasks.direct.automate import automate_algo_utils as automate_algo
+from isaaclab_tasks.direct.automate.soft_dtw_cuda import SoftDTW
 from isaaclab_tasks.direct.factory import factory_utils
 from isaaclab_tasks.direct.factory.factory_env import FactoryEnv
 
@@ -72,6 +73,7 @@ class ForgeEnv(FactoryEnv):
         ref_path = getattr(self.cfg_task, "ref_traj_json", "")
         if not ref_path:
             self.use_imitation_reward = False
+            self._imitation_pose_mode = False
             return
 
         if not os.path.isabs(ref_path):
@@ -81,31 +83,80 @@ class ForgeEnv(FactoryEnv):
         if not os.path.isfile(ref_path):
             print(f"[ForgeEnv] WARNING: ref_traj_json not found at {ref_path}, disabling imitation reward.")
             self.use_imitation_reward = False
+            self._imitation_pose_mode = False
             return
 
         with open(ref_path) as f:
             raw = json.load(f)
 
-        traj_list = []
-        for entry in raw:
-            pts = np.asarray(entry["held_tip_local"], dtype=np.float32).reshape(-1, 3)
-            traj_list.append(pts)
+        self._imitation_pose_mode = self._load_ref_traj_entries(raw)
+
+        self.num_point_robot_traj = getattr(self.cfg_task, "num_point_robot_traj", 10)
+        dtw_d = 7 if self._imitation_pose_mode else 3
+        self.prev_ee_traj = torch.zeros(
+            (self.num_envs, self.num_point_robot_traj, dtw_d),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        gamma = getattr(self.cfg_task, "soft_dtw_gamma", 0.01)
+        cuda_version = automate_algo.get_cuda_version()
+        if (cuda_version is not None) and (cuda_version < (13, 0, 0)):
+            self.soft_dtw_criterion = SoftDTW(use_cuda=True, device=self.device, gamma=gamma)
+        else:
+            self.soft_dtw_criterion = SoftDTW(use_cuda=False, device=self.device, gamma=gamma)
+
+        self.use_imitation_reward = True
+        mode = "pose (socket frame xyz+wxyz)" if self._imitation_pose_mode else "position-only"
+        print(
+            f"[ForgeEnv] Imitation reward (AutoMate Soft-DTW), {mode}: {len(raw)} trajectories, "
+            f"traj_len={self.ref_traj.shape[1]}, window={self.num_point_robot_traj}, gamma={gamma}"
+        )
+
+    def _load_ref_traj_entries(self, raw: list) -> bool:
+        """Stack reference trajectories; return True if 7D pose (socket frame), else False for xyz-only."""
+
+        def _parse_one(entry: dict, style: str) -> np.ndarray:
+            if style == "pose7":
+                return np.asarray(entry["held_tip_pose_local"], dtype=np.float32).reshape(-1, 7)
+            if style == "tip_quat":
+                tip = np.asarray(entry["held_tip_local"], dtype=np.float32).reshape(-1, 3)
+                quat = np.asarray(entry["held_quat_local"], dtype=np.float32).reshape(-1, 4)
+                if tip.shape[0] != quat.shape[0]:
+                    raise ValueError("held_tip_local and held_quat_local length mismatch.")
+                return np.concatenate([tip, quat], axis=-1)
+            if style == "tip_rpy":
+                tip = np.asarray(entry["held_tip_local"], dtype=np.float32).reshape(-1, 3)
+                rpy = np.asarray(entry["held_rpy_local"], dtype=np.float32).reshape(-1, 3)
+                if tip.shape[0] != rpy.shape[0]:
+                    raise ValueError("held_tip_local and held_rpy_local length mismatch.")
+                rr = torch.tensor(rpy[:, 0], dtype=torch.float32, device=self.device)
+                pp = torch.tensor(rpy[:, 1], dtype=torch.float32, device=self.device)
+                yy = torch.tensor(rpy[:, 2], dtype=torch.float32, device=self.device)
+                quat = torch_utils.quat_from_euler_xyz(rr, pp, yy).cpu().numpy()
+                return np.concatenate([tip, quat], axis=-1)
+            return np.asarray(entry["held_tip_local"], dtype=np.float32).reshape(-1, 3)
+
+        first = raw[0]
+        if "held_tip_pose_local" in first:
+            style = "pose7"
+        elif "held_tip_local" in first and "held_quat_local" in first:
+            style = "tip_quat"
+        elif "held_tip_local" in first and "held_rpy_local" in first:
+            style = "tip_rpy"
+        else:
+            style = "xyz"
+
+        traj_list = [_parse_one(entry, style) for entry in raw]
 
         traj_lens = [len(t) for t in traj_list]
         max_len = max(traj_lens)
         for i, t in enumerate(traj_list):
             if len(t) < max_len:
-                traj_list[i] = np.concatenate([t, np.tile(t[-1:], (max_len - len(t), 1))], axis=0)
+                pad = np.tile(t[-1:], (max_len - len(t), 1))
+                traj_list[i] = np.concatenate([t, pad], axis=0)
 
-        self.ref_traj = torch.tensor(
-            np.stack(traj_list, axis=0), dtype=torch.float32, device=self.device
-        )  # (num_trajs, traj_len, 3)
-
-        self.use_imitation_reward = True
-        print(
-            f"[ForgeEnv] Imitation reward enabled: {len(raw)} trajectories, "
-            f"traj_len={self.ref_traj.shape[1]}"
-        )
+        self.ref_traj = torch.tensor(np.stack(traj_list, axis=0), dtype=torch.float32, device=self.device)
+        return style != "xyz"
 
     def _get_held_tip_local(self):
         """Compute held asset tip position in socket local frame.
@@ -119,22 +170,15 @@ class ForgeEnv(FactoryEnv):
         delta_w = tip_world - self.fixed_pos
         return quat_apply_inverse(self.fixed_quat, delta_w)
 
-    def _compute_imitation_reward(self, curr_tip_local):
-        """Vectorised closest-point imitation reward (no DTW, no Python loops).
+    def _get_held_tip_pose_local(self):
+        """Held connector tip pose in socket (female) frame: position + quaternion (wxyz).
 
-        For each env, finds the closest point on any reference trajectory,
-        then rewards proximity weighted by forward progress along the trajectory.
+        Position matches ``_get_held_tip_local``. Orientation is ``inv(q_socket) * q_held`` (plug relative to socket),
+        same convention as ``collect_rj45_trajectories.py`` (rigid plug; tip uses held body orientation).
         """
-        ref_traj = self.ref_traj  # (T, L, 3)
-        L = ref_traj.shape[1]
-
-        _, min_step_idx, min_dist = automate_algo.get_closest_state_idx(
-            ref_traj, curr_tip_local,
-        )
-
-        closeness = torch.exp(-min_dist / 0.01)
-        w_progress = 1.0 - min_step_idx.float() / L
-        return closeness * w_progress
+        tip_pos = self._get_held_tip_local()
+        rel_quat = torch_utils.quat_mul(torch_utils.quat_conjugate(self.fixed_quat), self.held_quat)
+        return torch.cat([tip_pos, rel_quat], dim=-1)
 
     def _compute_intermediate_values(self, dt):
         """Add noise to observations for force sensing."""
@@ -401,8 +445,34 @@ class ForgeEnv(FactoryEnv):
         }
 
         if self.use_imitation_reward:
-            curr_tip_local = self._get_held_tip_local()
-            rew_dict["imitation"] = self._compute_imitation_reward(curr_tip_local)
+            if self._imitation_pose_mode:
+                curr_pose = self._get_held_tip_pose_local()
+                rew_dict["imitation"] = automate_algo.get_imitation_reward_from_dtw_pose_traj(
+                    self.ref_traj,
+                    curr_pose,
+                    self.prev_ee_traj,
+                    self.soft_dtw_criterion,
+                    self.device,
+                    pos_w=getattr(self.cfg_task, "imitation_pose_pos_w", 1.0),
+                    rot_w=getattr(self.cfg_task, "imitation_pose_rot_w", 0.35),
+                )
+                self.prev_ee_traj = torch.cat(
+                    (self.prev_ee_traj[:, 1:, :], curr_pose.unsqueeze(1).clone().detach()),
+                    dim=1,
+                )
+            else:
+                curr_tip_local = self._get_held_tip_local()
+                rew_dict["imitation"] = automate_algo.get_imitation_reward_from_dtw(
+                    self.ref_traj,
+                    curr_tip_local,
+                    self.prev_ee_traj,
+                    self.soft_dtw_criterion,
+                    self.device,
+                )
+                self.prev_ee_traj = torch.cat(
+                    (self.prev_ee_traj[:, 1:, :], curr_tip_local.unsqueeze(1).clone().detach()),
+                    dim=1,
+                )
             rew_scales["imitation"] = self.cfg_task.imitation_rwd_scale
 
         for rew_name, rew in rew_dict.items():
@@ -502,7 +572,17 @@ class ForgeEnv(FactoryEnv):
         rand_flips = torch.rand(self.num_envs) > 0.5
         self.flip_quats[rand_flips] = -1.0
 
-
+        if self.use_imitation_reward:
+            if self._imitation_pose_mode:
+                curr_pose = self._get_held_tip_pose_local()
+                self.prev_ee_traj[env_ids] = curr_pose[env_ids].unsqueeze(1).expand(
+                    -1, self.num_point_robot_traj, -1
+                )
+            else:
+                curr_tip = self._get_held_tip_local()
+                self.prev_ee_traj[env_ids] = curr_tip[env_ids].unsqueeze(1).expand(
+                    -1, self.num_point_robot_traj, -1
+                )
 
         # # ---- DEBUG: round-trip check (delete after verification) ----
         # _pos_act = self.actions[:, 0:3]

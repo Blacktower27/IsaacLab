@@ -410,7 +410,8 @@ class ForgeRJ45Insert(ForgeTask):
     # Formula: TCP_above_origin = tip_above_cavity + 0.017 + 0.064
     # Near mode: tip 30 mm above cavity entrance → TCP = 0.030 + 0.081 = 0.111 m
     # hand_init_pos: list = [0.00, 0.00, 0.111]
-    hand_init_pos: list = [0.00, 0.00, 0.211]
+    # hand_init_pos: list = [0.00, -0.006, 0.064]
+    hand_init_pos: list = [0.00, -0.006, 0.064]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0.0, 0.0]   # EE pointing down
     hand_init_orn_noise: list = [0.0, 0.0, 0.0]
@@ -476,7 +477,8 @@ class ForgeRJ45Insert(ForgeTask):
     # --- Fixed asset (socket) randomisation ---
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
     fixed_asset_init_orn_deg: float = 0.0
-    fixed_asset_init_orn_range_deg: float = 360.0
+    # fixed_asset_init_orn_range_deg: float = 360.0
+    fixed_asset_init_orn_range_deg: float = 0.0
 
     # --- Held asset (plug) in-gripper noise ---
     held_asset_pos_noise: list = [0.0, 0.0, 0.0]
@@ -489,7 +491,11 @@ class ForgeRJ45Insert(ForgeTask):
     # Set to "" to disable the imitation reward entirely.
     ref_traj_json: str = "scripts/rj45_ref_traj.json"
     imitation_rwd_scale: float = 1.0
-    num_point_robot_traj: int = 10  # rolling window of recent held-tip positions
+    num_point_robot_traj: int = 10  # rolling window (matches AutoMate assembly_env)
+    soft_dtw_gamma: float = 0.01  # same as AutoMate; use 0 for unsmoothed DTW
+    # Pose imitation (female/socket frame): used when ref JSON has 7D poses (see collect_rj45_trajectories.py).
+    imitation_pose_pos_w: float = 1.0
+    imitation_pose_rot_w: float = 0.35  # same default as AutoMate RJ45 pose DTW
 
     # --- Reward shaping ---
     contact_penalty_scale: float = 0.05
