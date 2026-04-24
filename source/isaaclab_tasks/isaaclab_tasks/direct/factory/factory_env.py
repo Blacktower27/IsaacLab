@@ -103,6 +103,7 @@ class FactoryEnv(DirectRLEnv):
             n = 2 + max(self.cfg_task.num_reset_extra_kp, self.cfg_task.num_success_extra_kp)
             self.kp_lid_local = torch.zeros((self.num_envs, n, 3), device=self.device)
             self.kp_box_local = torch.zeros((self.num_envs, n, 3), device=self.device)
+            self.kp_box_y_target = torch.zeros((self.num_envs, n), device=self.device)
 
         # [CUSTOM] Per-episode keypoints for rj45_insert — uniformly sampled on the
         # male bottom patch XY plane.  Buffers are zero-initialised here and filled
@@ -133,13 +134,12 @@ class FactoryEnv(DirectRLEnv):
         #         [x_hi,  y_lo + plug_dy, z_f],   # back right
         #     ], dtype=torch.float32, device=self.device).unsqueeze(0).expand(self.num_envs, -1, -1).clone()
 
-        # [CUSTOM] Per-episode keypoints for bnc_insert — two-phase strategy.
-        # Phase 1: num_reset_kp Z-axis keypoints in the tip/opening frame (X=Y=0, Z in [-60mm, 0]).
-        # Phase 2: num_success_kp random body keypoints (XY in +-11mm, Z in [-60mm, 0]).
-        # Buffer size = max(num_reset_kp, num_success_kp).
+        # [CUSTOM] Per-episode keypoints for bnc_insert: Z-only on plug; socket-side Z eases down
+        # when close. Buffer size = max(num_reset_kp, num_success_kp).
         if self.cfg_task.name == "bnc_insert":
             _N_BNC_KP = max(self.cfg_task.num_reset_kp, self.cfg_task.num_success_kp)
             self.kp_bnc_local = torch.zeros((self.num_envs, _N_BNC_KP, 3), device=self.device)
+            self.kp_bnc_fixed_local = torch.zeros((self.num_envs, _N_BNC_KP, 3), device=self.device)
 
     def _setup_scene(self):
         """Initialize simulation scene."""
@@ -459,6 +459,12 @@ class FactoryEnv(DirectRLEnv):
         """
         self._compute_intermediate_values(dt=self.physics_dt)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        if bool(getattr(self.cfg_task, "terminate_on_success", False)):
+            check_rot = self.cfg_task.name == "nut_thread"
+            success_now = self._get_curr_successes(
+                self.cfg_task.success_threshold, check_rot=check_rot
+            )
+            return success_now, time_out & ~success_now
         return time_out, time_out
 
     def _get_curr_successes(self, success_threshold, check_rot=False):
@@ -556,7 +562,7 @@ class FactoryEnv(DirectRLEnv):
                 #   Y: ±2 mm from outer clip face / front wall (Y = -0.0444)
                 #   Z: [21, 29] mm — full pocket Z window
                 _X_TOL        = 0.002
-                _Y_TOL        = 0.004 #used to be 0.002, relaxed to 4mm to account for slight misalignments that still constitute success 
+                _Y_TOL        = 0.003 #used to be 0.002, relaxed to 4mm to account for slight misalignments that still constitute success 
                 _HOLE_WALL_Y  = -0.0444
                 _Z_MIN, _Z_MAX = 0.021, 0.029
 
@@ -627,18 +633,8 @@ class FactoryEnv(DirectRLEnv):
         elif self.cfg_task.name == "bnc_insert":
             # [CUSTOM] BNC Small insertion — two distinct checks dispatched by threshold value:
             #
-            #   engage_threshold  > 1.0  (e.g. 2.0)  → ENGAGE: XY + yaw(180°) + tilt + Z
-            #   success_threshold < 0    (e.g. -0.3)  → SUCCESS: tip inside socket + XY + yaw
-            #
-            # BNC has two bayonet protrusions ~180° apart (r=22.4mm, along the plug X axis,
-            # Z=[75.7, 107.2]mm in plug USD frame).  Because of 180° rotational symmetry,
-            # yaw alignment is checked with period π:
-            #   yaw_diff_sym = min(|Δyaw| mod π, π - |Δyaw| mod π) ∈ [0, π/2]
-            #   aligned when yaw_diff_sym < 30° (= π/6)
-            # This fires for both Δyaw ≈ 0° AND Δyaw ≈ 180° (both valid insertion orientations).
-            #
-            # KEY DIFFERENCE vs rj45_insert: yaw is ALSO required for success (not just engage),
-            # because the bayonet protrusions must face the entry slots for the plug to seat.
+            #   engage_threshold  > 1.0  (e.g. 2.0)  → ENGAGE: XY + π-sym yaw + tilt + Z
+            #   success_threshold < 0    (e.g. -0.3)  → SUCCESS: tip depth + XY (no yaw)
             ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).expand(self.num_envs, -1)
             socket_opening_local = torch.zeros((self.num_envs, 3), device=self.device)
             socket_opening_local[:, 2] = fixed_cfg.height  # = 0.025 m
@@ -650,22 +646,17 @@ class FactoryEnv(DirectRLEnv):
                 socket_opening_world[:, 0:2] - held_base_pos[:, 0:2], dim=1
             )
 
-            # Yaw with 180° symmetry: protrusions at ~0° and ~180° in plug local frame.
-            # Fold Δyaw into [0, π/2] so both 0° and 180° alignments fire.
-            _, _, plug_yaw = torch_utils.get_euler_xyz(self.held_quat)
-            _, _, sock_yaw = torch_utils.get_euler_xyz(self.fixed_quat)
-            yaw_diff_raw = (plug_yaw - sock_yaw + torch.pi) % (2 * torch.pi) - torch.pi  # [-π, π]
-            yaw_diff_sym = torch.minimum(yaw_diff_raw.abs(), torch.pi - yaw_diff_raw.abs())  # [0, π/2]
-            _YAW_TOL = 0.175  # 10° = π/18
-            is_yaw = yaw_diff_sym < _YAW_TOL
-
             if success_threshold > 1.0:
                 # ── ENGAGE check ──────────────────────────────────────────────────────
                 # 1. XY: tip centre within 4 mm of socket opening centre.
                 is_xy = xy_dist < 0.004
 
-                # 2. Yaw: bayonet protrusion axis aligned with socket slots (±30°, 180° sym).
-                # (is_yaw computed above)
+                # 2. Yaw (180° symmetry, BNC bayonet).
+                _, _, plug_yaw = torch_utils.get_euler_xyz(self.held_quat)
+                _, _, sock_yaw = torch_utils.get_euler_xyz(self.fixed_quat)
+                yaw_diff_raw = (plug_yaw - sock_yaw + torch.pi) % (2 * torch.pi) - torch.pi
+                yaw_diff_sym = torch.minimum(yaw_diff_raw.abs(), torch.pi - yaw_diff_raw.abs())
+                is_yaw = yaw_diff_sym < 0.175  # ~10°
 
                 # 3. Tilt: plug -Z axis points toward world -Z (vertical, < 15° deviation).
                 plug_z_local = torch.zeros((self.num_envs, 3), device=self.device)
@@ -673,24 +664,28 @@ class FactoryEnv(DirectRLEnv):
                 plug_z_world = torch_utils.quat_rotate(self.held_quat, plug_z_local)
                 is_tilt = -plug_z_world[:, 2] > 0.966  # cos(15°) ≈ 0.966
 
-                # 4. Z (loose): tip within 40 mm above socket opening.
-                is_z = z_disp < 0.040
+                # 4. Z: not too far above opening, and optionally minimum depth inside (inclusive).
+                z_loose_max = float(getattr(self.cfg_task, "bnc_engage_z_max_above_opening", 0.040))
+                min_depth = float(getattr(self.cfg_task, "bnc_engage_min_depth_m", 0.0))
+                is_z = z_disp < z_loose_max
+                if min_depth > 0.0:
+                    is_z = is_z & (z_disp <= -min_depth)
 
-                # After first success the plug is latched — yaw no longer required.
                 already_succeeded = self.ep_succeeded.bool()
                 curr_successes = is_xy & (is_yaw | already_succeeded) & is_tilt & is_z
             else:
                 # ── SUCCESS check ─────────────────────────────────────────────────
-                # Tip must be inside socket by |success_threshold × height| metres,
-                # XY aligned, AND yaw aligned (bayonet protrusions facing entry slots).
-                #   height_threshold = 0.025 × (-0.3) = -0.0075 m → 7.5 mm inside socket.
+                # Tip must be inside socket past height_threshold on z_disp (tip minus opening),
+                # XY aligned.  Base: height × success_threshold; optional bnc_success_min_depth_m.
                 height_threshold = fixed_cfg.height * success_threshold
-                is_inside    = z_disp < height_threshold
+                succ_min = float(getattr(self.cfg_task, "bnc_success_min_depth_m", 0.0))
+                if succ_min > 0.0:
+                    height_threshold = min(height_threshold, -succ_min)
+                # Inclusive at threshold; small eps avoids sim / transform float noise at the boundary.
+                _z_eps = float(getattr(self.cfg_task, "bnc_success_z_eps_m", 1e-5))
+                is_inside    = z_disp <= height_threshold + _z_eps
                 is_xy_strict = xy_dist < 0.003
-                # After first success the plug is latched — yaw no longer required,
-                # only Z depth and XY alignment matter for sustained success.
-                already_succeeded = self.ep_succeeded.bool()
-                curr_successes = is_inside & is_xy_strict & (is_yaw | already_succeeded)
+                curr_successes = is_inside & is_xy_strict
 
         else:
             raise NotImplementedError("Task not implemented")
@@ -733,17 +728,6 @@ class FactoryEnv(DirectRLEnv):
         #     self.kp_rj45_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.0182 - 0.00503
         #     self.kp_rj45_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.014
 
-        # [CUSTOM] BNC Phase 2: on first success, replace Z-axis keypoints with random body
-        # keypoints spread across the connector region inside the socket.
-        # Full insertion: tip at socket_origin - 4.765mm; socket opening at +25mm above origin
-        # → inserted region in held_base frame: Z ∈ [0, +30mm], XY ∈ ±11mm (connector radius).
-        if self.cfg_task.name == "bnc_insert" and len(first_success_ids) > 0:
-            ns = self.cfg_task.num_success_kp
-            r = torch.rand((len(first_success_ids), ns, 3), device=self.device)
-            self.kp_bnc_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.022 - 0.011  # X ∈ [-11, +11] mm
-            self.kp_bnc_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.022 - 0.011  # Y ∈ [-11, +11] mm
-            self.kp_bnc_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.030           # Z ∈ [0, +30] mm
-
         # [CUSTOM] For box_lid_insert: on first success, keep the 2 clip keypoints (index 0,1)
         # and replace index 2..2+ns-1 with random keypoints spread across the lid body.
         # Updated here so the NEXT call to _get_factory_rew_dict picks up the new keypoints.
@@ -755,6 +739,12 @@ class FactoryEnv(DirectRLEnv):
             kp[:, :, 2] = kp[:, :, 2] * 0.0112 + 0.0188  # Z: [+18.8, +30.0] mm
             self.kp_lid_local[first_success_ids, 2:2 + ns] = kp
             self.kp_box_local[first_success_ids, 2:2 + ns] = kp
+            dz_box = float(getattr(self.cfg_task, "kp_box_z_offset", 0.0))
+            if dz_box != 0.0:
+                self.kp_box_local[first_success_ids, 2 : 2 + ns, 2] += dz_box
+            self.kp_box_y_target[first_success_ids, 2 : 2 + ns] = kp[:, :, 1].clone()
+            y0 = self.cfg_task.kp_advance_y_start
+            self.kp_box_local[first_success_ids, 2 : 2 + ns, 1] = y0
         nonzero_success_ids = self.ep_success_times.nonzero(as_tuple=False).squeeze(-1)
 
         if len(nonzero_success_ids) > 0:  # Only log for successful episodes.
@@ -771,6 +761,11 @@ class FactoryEnv(DirectRLEnv):
         curr_successes = self._get_curr_successes(
             success_threshold=self.cfg_task.success_threshold, check_rot=check_rot
         )
+        # BNC: optional — mask off success (no curr_success reward, no ep_succeeded latch).
+        if self.cfg_task.name == "bnc_insert" and not bool(
+            getattr(self.cfg_task, "bnc_apply_success_criteria", True)
+        ):
+            curr_successes = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
 
         rew_dict, rew_scales = self._get_factory_rew_dict(curr_successes)
 
@@ -790,9 +785,8 @@ class FactoryEnv(DirectRLEnv):
         # Compute pos of keypoints on held asset, and fixed asset in world frame.
         ident = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         if self.cfg_task.name == "box_lid_insert":
-            # [CUSTOM] Use per-episode randomly sampled keypoints (fixed within episode).
-            # kp_lid_local and kp_box_local are identical because at the success pose
-            # the lid USD origin coincides with the box USD origin.
+            # [CUSTOM] Per-episode keypoints: lid side stays at success geometry; box-side Y
+            # eases from kp_advance_y_start toward kp_box_y_target (see _get_factory_rew_dict).
             n = 2 + max(self.cfg_task.num_reset_extra_kp, self.cfg_task.num_success_extra_kp)
             keypoints_held  = torch.zeros((self.num_envs, n, 3), device=self.device)
             keypoints_fixed = torch.zeros((self.num_envs, n, 3), device=self.device)
@@ -815,11 +809,7 @@ class FactoryEnv(DirectRLEnv):
                     self.fixed_quat, self.fixed_pos, ident, self.kp_rj45_female_local[:, i]
                 )
         elif self.cfg_task.name == "bnc_insert":
-            # [CUSTOM] Per-episode random body keypoints for bnc_insert.
-            # At full insertion the male tip (held_base) coincides with the socket opening
-            # (target_held_base) and orientations match.  Applying the SAME random
-            # local-frame offsets from both base poses gives keypoint_dist → 0 at success.
-            # XY spread (±11mm) encodes yaw alignment; Z spread (−60mm…0) encodes depth.
+            # Z-axis keypoints on plug; socket uses kp_bnc_fixed_local (eased down when close).
             held_base_pos_kp, held_base_quat_kp = factory_utils.get_held_base_pose(
                 self.held_pos, self.held_quat, self.cfg_task.name,
                 self.cfg_task.fixed_asset_cfg, self.num_envs, self.device,
@@ -837,7 +827,7 @@ class FactoryEnv(DirectRLEnv):
                     held_base_quat_kp,   held_base_pos_kp,   ident, self.kp_bnc_local[:, i]
                 )
                 _, keypoints_fixed[:, i] = torch_utils.tf_combine(
-                    target_base_quat_kp, target_base_pos_kp, ident, self.kp_bnc_local[:, i]
+                    target_base_quat_kp, target_base_pos_kp, ident, self.kp_bnc_fixed_local[:, i]
                 )
         else:
             held_base_pos, held_base_quat = factory_utils.get_held_base_pose(
@@ -880,6 +870,32 @@ class FactoryEnv(DirectRLEnv):
                 self.kp_rj45_female_local[close, :, 2] -= self.cfg_task.kp_advance_step
                 self.kp_rj45_female_local[:, :, 2].clamp_(min=self.cfg_task.kp_advance_z_limit)
 
+        # [CUSTOM] Progressive box keypoint Y for box_lid_insert: lid targets stay fixed;
+        # box-side Y walks from kp_advance_y_start toward true success Y per keypoint.
+        if self.cfg_task.name == "box_lid_insert":
+            close = keypoint_dist < self.cfg_task.kp_advance_threshold
+            if close.any():
+                step = self.cfg_task.kp_advance_y_step
+                cur = self.kp_box_local[:, :, 1]
+                tgt = self.kp_box_y_target
+                diff = tgt - cur
+                delta = torch.sign(diff) * torch.minimum(diff.abs(), torch.full_like(diff, step))
+                self.kp_box_local[close, :, 1] = cur[close] + delta[close]
+
+        # [CUSTOM] BNC: when close enough, step socket-side Z down toward plug locals; snap on success.
+        if self.cfg_task.name == "bnc_insert":
+            nr = self.cfg_task.num_reset_kp
+            thr = float(getattr(self.cfg_task, "bnc_kp_advance_threshold", 0.005))
+            step = float(getattr(self.cfg_task, "bnc_kp_advance_step", 0.0002))
+            close = keypoint_dist < thr
+            if close.any():
+                self.kp_bnc_fixed_local[close, :nr, 2] -= step
+                self.kp_bnc_fixed_local[:, :nr, 2] = torch.maximum(
+                    self.kp_bnc_fixed_local[:, :nr, 2], self.kp_bnc_local[:, :nr, 2]
+                )
+            succ = curr_successes.bool()
+            if succ.any():
+                self.kp_bnc_fixed_local[succ] = self.kp_bnc_local[succ].clone()
 
         a0, b0 = self.cfg_task.keypoint_coef_baseline
         a1, b1 = self.cfg_task.keypoint_coef_coarse
@@ -957,28 +973,48 @@ class FactoryEnv(DirectRLEnv):
         #     r = torch.rand((len(env_ids), nr), device=self.device)
         #     self.kp_rj45_local[env_ids, :nr, 2] = r * (0.08847 + 0.003)
 
-        # [CUSTOM] BNC Phase 1: Z-axis keypoints along connector body (X=Y=0, Z ∈ [0, +77mm]).
-        # Z=0 is tip (held_base origin); Z>0 is up the connector body in held_base local frame.
-        # Pure Z spread drives XY alignment and approach without straight-down bias.
+        # [CUSTOM] BNC: Z-axis keypoints; Z ~ center ± half_spread on plug, socket + init extra on Z.
         if self.cfg_task.name == "bnc_insert":
             nr = self.cfg_task.num_reset_kp
             self.kp_bnc_local[env_ids] = 0.0
             r = torch.rand((len(env_ids), nr), device=self.device)
-            self.kp_bnc_local[env_ids, :nr, 2] = r * 0.077  # Z ∈ [0, +77mm] (tip to cable end)
+            z_c = float(getattr(self.cfg_task, "bnc_kp_z_center", 0.055))
+            z_hs = float(getattr(self.cfg_task, "bnc_kp_z_half_spread", 0.024))
+            self.kp_bnc_local[env_ids, :nr, 2] = z_c + (r - 0.5) * (2.0 * z_hs)
+            self.kp_bnc_fixed_local[env_ids] = self.kp_bnc_local[env_ids].clone()
+            z_base = float(getattr(self.cfg_task, "bnc_kp_socket_z_init_extra", 0.0))
+            z_hi = float(getattr(self.cfg_task, "bnc_kp_socket_z_above_engage_m", 0.0))
+            z_bump = z_base + z_hi
+            if z_bump != 0.0:
+                self.kp_bnc_fixed_local[env_ids, :nr, 2] += z_bump
 
-        # [CUSTOM] Keypoints for box_lid_insert.
-        # At success pose lid origin = box origin, so kp_box_local == kp_lid_local.
+        # [CUSTOM] Keypoints for box_lid_insert (box Y reset below).
         if self.cfg_task.name == "box_lid_insert":
             nr = self.cfg_task.num_reset_extra_kp
             ns = self.cfg_task.num_success_extra_kp
             n_total = 2 + max(nr, ns)
-            left_clip  = torch.tensor([-0.025218, -0.0444, 0.0289], device=self.device)
-            right_clip = torch.tensor([ 0.024250, -0.0444, 0.0289], device=self.device)
+            left_lid = torch.tensor([-0.025218, -0.0444, 0.0289], device=self.device)
+            right_lid = torch.tensor([0.024250, -0.0444, 0.0289], device=self.device)
+            ease_l = getattr(self.cfg_task, "kp_box_clip_ease_end_left", None)
+            ease_r = getattr(self.cfg_task, "kp_box_clip_ease_end_right", None)
+            use_box_clip_ease_end = (
+                ease_l is not None
+                and ease_r is not None
+                and len(ease_l) == 3
+                and len(ease_r) == 3
+            )
 
-            # index 0,1: fixed clip positions
-            for buf in (self.kp_lid_local, self.kp_box_local):
-                buf[env_ids, 0] = left_clip.unsqueeze(0).expand(len(env_ids), -1)
-                buf[env_ids, 1] = right_clip.unsqueeze(0).expand(len(env_ids), -1)
+            # index 0,1: clip positions — lid locals nominal; box locals may use measured ease-end XYZ.
+            self.kp_lid_local[env_ids, 0] = left_lid.unsqueeze(0).expand(len(env_ids), -1)
+            self.kp_lid_local[env_ids, 1] = right_lid.unsqueeze(0).expand(len(env_ids), -1)
+            if use_box_clip_ease_end:
+                left_box_end = torch.tensor(ease_l, device=self.device, dtype=torch.float32)
+                right_box_end = torch.tensor(ease_r, device=self.device, dtype=torch.float32)
+                self.kp_box_local[env_ids, 0] = left_box_end.unsqueeze(0).expand(len(env_ids), -1)
+                self.kp_box_local[env_ids, 1] = right_box_end.unsqueeze(0).expand(len(env_ids), -1)
+            else:
+                for idx, lc in ((0, left_lid), (1, right_lid)):
+                    self.kp_box_local[env_ids, idx] = lc.unsqueeze(0).expand(len(env_ids), -1)
 
             # index 2..2+nr-1: extra front-face keypoints (same Y,Z as clips; X random in lid front)
             if nr > 0:
@@ -995,9 +1031,19 @@ class FactoryEnv(DirectRLEnv):
             # to avoid zero-initialization until first success replaces them.
             if ns > nr:
                 spare = ns - nr
-                spare_kp = left_clip.unsqueeze(0).unsqueeze(0).expand(len(env_ids), spare, -1)
+                spare_kp = left_lid.unsqueeze(0).unsqueeze(0).expand(len(env_ids), spare, -1)
                 for buf in (self.kp_lid_local, self.kp_box_local):
                     buf[env_ids, 2 + nr:n_total] = spare_kp
+
+            # Raise box-side keypoint Z only (optional); lid ``kp_lid_local`` unchanged.
+            dz_box = float(getattr(self.cfg_task, "kp_box_z_offset", 0.0))
+            if dz_box != 0.0:
+                self.kp_box_local[env_ids, :, 2] += dz_box
+
+            # Save true success Y per box keypoint, then ease box-side Y from start toward target.
+            self.kp_box_y_target[env_ids] = self.kp_box_local[env_ids, :, 1].clone()
+            y0 = self.cfg_task.kp_advance_y_start
+            self.kp_box_local[env_ids, :, 1] = y0
 
     def _set_assets_to_default_pose(self, env_ids):
         """Move assets to default pose before randomization."""
@@ -1207,7 +1253,7 @@ class FactoryEnv(DirectRLEnv):
         fixed_asset_pos_noise = torch.randn((len(env_ids), 3), dtype=torch.float32, device=self.device)
         fixed_asset_pos_rand = torch.tensor(self.cfg.obs_rand.fixed_asset_pos, dtype=torch.float32, device=self.device)
         fixed_asset_pos_noise = fixed_asset_pos_noise @ torch.diag(fixed_asset_pos_rand)
-        self.init_fixed_pos_obs_noise[:] = fixed_asset_pos_noise
+        self.init_fixed_pos_obs_noise[env_ids] = fixed_asset_pos_noise
 
         self.step_sim_no_action()
 
@@ -1239,21 +1285,32 @@ class FactoryEnv(DirectRLEnv):
             _is_near[env_ids[_near_mask]] = True
         # "far": _is_near stays all False
 
-        # RJ45 contact-init: sample a desired held-plug pose near the socket and
-        # convert it back to a fingertip IK target.  Works for both Kuka (plug is
-        # an embedded robot link) and Franka (plug is a separate held asset).
+        # Contact-init: sample a desired held-asset pose touching the fixed part,
+        # then convert to fingertip IK targets.  RJ45: plug vs socket rear edge.
+        # Box: lid front rim vs box rear top edge (left/right halves paired).
+        # BNC: female bore vs male tip face (bnc_contact_init_*).
+        # Works for Kuka (embedded link) and Franka (separate held asset).
         use_rj45_contact_init = (
             self.cfg_task.name == "rj45_insert"
             and _init_mode == "contact"
         )
+        use_box_contact_init = (
+            self.cfg_task.name == "box_lid_insert"
+            and _init_mode == "contact"
+        )
+        use_bnc_contact_init = (
+            self.cfg_task.name == "bnc_insert"
+            and _init_mode == "contact"
+        )
+        use_contact_style_init = use_rj45_contact_init or use_box_contact_init or use_bnc_contact_init
         held_to_fingertip_quat = held_to_fingertip_pos = None
-        if use_rj45_contact_init:
+        if use_contact_style_init:
             flip_z_quat = torch.tensor(
                 [0.0, 0.0, 1.0, 0.0], device=self.device
             ).unsqueeze(0).repeat(self.num_envs, 1)
-            if self.cfg.ctrl.held_body_name == "link_rj45":
-                # Kuka: measure the fingertip<->link_rj45 transform from the
-                # current reset pose (link_rj45 is an embedded robot body).
+            if self.cfg.ctrl.held_body_name in ("link_rj45", "link_lid", "link_bnc"):
+                # Kuka: measure fingertip<->held link transform from the current
+                # reset pose (embedded robot body).
                 fingertip_inv_quat, fingertip_inv_pos = torch_utils.tf_inverse(
                     self.fingertip_midpoint_quat,
                     self.fingertip_midpoint_pos,
@@ -1293,11 +1350,13 @@ class FactoryEnv(DirectRLEnv):
 
             above_fixed_pos = fixed_tip_pos.clone()
             above_fixed_pos[:, 2] += self.cfg_task.hand_init_pos[2]
-            if use_rj45_contact_init:
+            if use_contact_style_init:
                 ident_n = torch.tensor(
                     [1.0, 0.0, 0.0, 0.0], device=self.device
                 ).unsqueeze(0).expand(n_bad, -1)
 
+                # Same convention as RJ45: small RPY jitter in the *fixed/box* frame only
+                # (no large nominal euler — that wrongly over-rotated the lid in contact init).
                 roll_lo, roll_hi = self.cfg_task.contact_init_roll_range_deg
                 pitch_lo, pitch_hi = self.cfg_task.contact_init_pitch_range_deg
                 yaw_lo, yaw_hi = self.cfg_task.contact_init_yaw_range_deg
@@ -1310,29 +1369,80 @@ class FactoryEnv(DirectRLEnv):
                 yaw = torch.deg2rad(
                     torch.rand(n_bad, device=self.device) * (yaw_hi - yaw_lo) + yaw_lo
                 )
+                if use_bnc_contact_init:
+                    yaw = yaw + torch.randint(0, 2, (n_bad,), device=self.device).float() * torch.pi
                 held_contact_quat = torch_utils.quat_mul(
                     self.fixed_quat[bad_envs],
                     torch_utils.quat_from_euler_xyz(roll, pitch, yaw),
                 )
 
                 female_point_local = torch.zeros((n_bad, 3), device=self.device)
-                x_lo, x_hi = self.cfg_task.female_rear_edge_x_range_local
-                female_point_local[:, 0] = torch.rand(n_bad, device=self.device) * (x_hi - x_lo) + x_lo
-                female_point_local[:, 1] = self.cfg_task.female_rear_edge_y_local
-                female_point_local[:, 2] = self.cfg_task.female_rear_edge_z_local
+                male_point_local = torch.zeros((n_bad, 3), device=self.device)
+                if use_rj45_contact_init:
+                    x_lo, x_hi = self.cfg_task.female_rear_edge_x_range_local
+                    female_point_local[:, 0] = torch.rand(n_bad, device=self.device) * (x_hi - x_lo) + x_lo
+                    female_point_local[:, 1] = self.cfg_task.female_rear_edge_y_local
+                    female_point_local[:, 2] = self.cfg_task.female_rear_edge_z_local
+                    x_lo, x_hi = self.cfg_task.male_bottom_patch_x_range_local
+                    y_lo, y_hi = self.cfg_task.male_bottom_patch_y_range_local
+                    male_point_local[:, 0] = torch.rand(n_bad, device=self.device) * (x_hi - x_lo) + x_lo
+                    male_point_local[:, 1] = torch.rand(n_bad, device=self.device) * (y_hi - y_lo) + y_lo
+                    male_point_local[:, 2] = self.cfg_task.male_bottom_patch_z_local
+                elif use_bnc_contact_init:
+                    fxl, fxh = self.cfg_task.bnc_contact_init_female_x_range
+                    fyl, fyh = self.cfg_task.bnc_contact_init_female_y_range
+                    female_point_local[:, 0] = torch.rand(n_bad, device=self.device) * (fxh - fxl) + fxl
+                    female_point_local[:, 1] = torch.rand(n_bad, device=self.device) * (fyh - fyl) + fyl
+                    female_point_local[:, 2] = self.cfg_task.bnc_contact_init_female_z_local
+                    mxl, mxh = self.cfg_task.bnc_contact_init_male_x_range
+                    myl, myh = self.cfg_task.bnc_contact_init_male_y_range
+                    male_point_local[:, 0] = torch.rand(n_bad, device=self.device) * (mxh - mxl) + mxl
+                    male_point_local[:, 1] = torch.rand(n_bad, device=self.device) * (myh - myl) + myl
+                    male_point_local[:, 2] = self.cfg_task.bnc_contact_init_male_z_local
+                else:
+                    side = torch.randint(0, 2, (n_bad,), device=self.device)
+                    bx_lo, bx_hi = self.cfg_task.box_contact_rear_edge_x_range
+                    bx_mid = 0.5 * (bx_lo + bx_hi)
+                    x_lo_b = torch.where(
+                        side == 0,
+                        torch.full((n_bad,), bx_lo, device=self.device),
+                        torch.full((n_bad,), bx_mid, device=self.device),
+                    )
+                    x_hi_b = torch.where(
+                        side == 0,
+                        torch.full((n_bad,), bx_mid, device=self.device),
+                        torch.full((n_bad,), bx_hi, device=self.device),
+                    )
+                    female_point_local[:, 0] = (
+                        torch.rand(n_bad, device=self.device) * (x_hi_b - x_lo_b) + x_lo_b
+                    )
+                    female_point_local[:, 1] = self.cfg_task.box_contact_rear_edge_y_local
+                    female_point_local[:, 2] = self.cfg_task.box_contact_rear_edge_z_local
+
+                    lx_lo, lx_hi = self.cfg_task.lid_contact_front_edge_x_range
+                    lx_mid = 0.5 * (lx_lo + lx_hi)
+                    x_lo_l = torch.where(
+                        side == 0,
+                        torch.full((n_bad,), lx_lo, device=self.device),
+                        torch.full((n_bad,), lx_mid, device=self.device),
+                    )
+                    x_hi_l = torch.where(
+                        side == 0,
+                        torch.full((n_bad,), lx_mid, device=self.device),
+                        torch.full((n_bad,), lx_hi, device=self.device),
+                    )
+                    male_point_local[:, 0] = (
+                        torch.rand(n_bad, device=self.device) * (x_hi_l - x_lo_l) + x_lo_l
+                    )
+                    male_point_local[:, 1] = self.cfg_task.lid_contact_front_edge_y_local
+                    male_point_local[:, 2] = self.cfg_task.lid_contact_front_edge_z_local
+
                 _, female_point_world = torch_utils.tf_combine(
                     self.fixed_quat[bad_envs],
                     self.fixed_pos[bad_envs],
                     ident_n,
                     female_point_local,
                 )
-
-                male_point_local = torch.zeros((n_bad, 3), device=self.device)
-                x_lo, x_hi = self.cfg_task.male_bottom_patch_x_range_local
-                y_lo, y_hi = self.cfg_task.male_bottom_patch_y_range_local
-                male_point_local[:, 0] = torch.rand(n_bad, device=self.device) * (x_hi - x_lo) + x_lo
-                male_point_local[:, 1] = torch.rand(n_bad, device=self.device) * (y_hi - y_lo) + y_lo
-                male_point_local[:, 2] = self.cfg_task.male_bottom_patch_z_local
 
                 held_contact_pos = female_point_world - torch_utils.quat_rotate(
                     held_contact_quat,
@@ -1555,13 +1665,14 @@ class FactoryEnv(DirectRLEnv):
         held_asset_pos_noise = 2 * (rand_sample)  # [-1, 1]
         if self.cfg_task.name == "gear_mesh":
             held_asset_pos_noise[:, 2] = -rand_sample[:, 2]  # [-1, 0]
-    
+
         held_asset_pos_noise_level = torch.tensor(self.cfg_task.held_asset_pos_noise, device=self.device)
         held_asset_pos_noise = held_asset_pos_noise @ torch.diag(held_asset_pos_noise_level)
+        ident_noise_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         translated_held_asset_quat, translated_held_asset_pos = torch_utils.tf_combine(
             q1=translated_held_asset_quat,
             t1=translated_held_asset_pos,
-            q2=torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1),
+            q2=ident_noise_q,
             t2=held_asset_pos_noise,
         )
 
@@ -1575,10 +1686,16 @@ class FactoryEnv(DirectRLEnv):
             self._held_asset.reset()
 
         # DEBUG: pause before closing gripper so you can inspect object placement.
+        # This runs before the "Close hand" gain setup below; ForgeEnv also sets task_prop_gains
+        # only after super()._reset_idx. Seed default PD gains for close_gripper_in_place.
+        # if not hasattr(self, "task_prop_gains"):
+        #     self.task_prop_gains = self.default_gains.clone()
+        #     self.task_deriv_gains = factory_utils.get_deriv_gains(self.task_prop_gains)
         # print("Debug observe...")
         # _DEBUG_OBSERVE_S = 20.0
         # _t = 0.0
         # while _t < _DEBUG_OBSERVE_S:
+        #     self.close_gripper_in_place()
         #     self.scene.write_data_to_sim()
         #     self.sim.step(render=True)  # render=True prevents Fabric clone failure
         #     self.scene.update(dt=self.physics_dt)

@@ -1,18 +1,29 @@
-"""Visualize and interactively test the ForgeBoxLidInsert success check.
+"""Visualize and interactively test the ForgeBoxLidInsert success / contact geometry.
 
 Keyboard controls (click the viewport once to give it focus):
-  Arrow Up / Down   — move lid +Y / -Y  (forward / back)
-  Arrow Left / Right— move lid -X / +X  (left / right)
+  Arrow Up / Down   — move lid +Y / -Y  (world axes)
+  Arrow Left / Right— move lid -X / +X  (world axes)
   Q / E             — move lid +Z / -Z  (up / down)
   I / K             — pitch lid +/-
   J / L             — yaw   lid +/-
   U / O             — roll  lid +/-
   Hold Shift        — 5× speed
-  R                 — reset lid to success position (offsets → 0)
+  C                 — CONTACT init: sample paired left/right half + base RPY (matches factory_env)
+  R                 — reset lid to nominal success offsets (pos/euler → defaults)
 
 Coloured sphere markers (updated every frame):
-  BLUE  — clip tooth positions (lid frame → world)
-  RED   — hole target positions (box frame → world)
+  BLUE   — clip tooth positions (lid frame → world)
+  RED    — hole rim reference (box frame → world)
+  GREEN  — reward keypoints on lid (success geometry; fixed within episode)
+  YELLOW — reward keypoints on box — current eased Y (starts at kp_advance_y_start, steps toward target)
+  PURPLE — same keypoints at full success Y in box frame (kp_box_y_target + lid X/Z) — overlap yellow when eased
+  WHITE  — box rear top edge (full X span from cfg) — calibrate Y/Z here
+  CYAN   — lid front edge (full X span from cfg) — calibrate Y/Z here
+  ORANGE — left X-half of box rear edge  (pair with green lid half)
+  MAGENTA— right X-half of box rear edge
+  LIME   — left X-half of lid front edge
+  HOT PINK — right X-half of lid front edge
+  (small) RED dots — X midpoints on rear / front guides (split plane)
 
 When the lid is at the success position the blue and red markers overlap.
 
@@ -112,11 +123,83 @@ def _key(k) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Interactive lid pose state (relative to the box, expressed in box local).
-# Reset (R key) brings these back to zero = exact success position.
+# Interactive lid pose state
 # ---------------------------------------------------------------------------
-_pos_offset  = [0.0, 0.0, 0.015]   # XYZ offset in world frame, metres
-_euler_offset = [0.0, 0.0, 0.0]  # [roll, pitch, yaw] offset, radians
+# Position offset in world frame (metres). Default lifts lid slightly for visibility.
+_pos_offset = [0.0, 0.0, 0.015]
+# Rotation offset on top of box orientation: quat_mul(box_quat, euler_xyz(...)).
+_euler_offset = [0.0, 0.0, 0.0]
+
+_REAR_EDGE_SAMPLES = 13
+_FRONT_EDGE_SAMPLES = 13
+
+
+def _teleport_contact(inner):
+    """Sample the same contact init as factory_env (paired L/R X halves + base RPY + noise)."""
+    global _pos_offset, _euler_offset
+
+    cfg = inner.cfg_task
+    device = inner.device
+    n = inner.num_envs
+    box_pos_w = inner._fixed_asset.data.root_pos_w.clone()
+    box_quat_w = inner._fixed_asset.data.root_quat_w.clone()
+    ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(n, -1)
+
+    side = torch.randint(0, 2, (n,), device=device)
+    bx_lo, bx_hi = cfg.box_contact_rear_edge_x_range
+    bx_mid = 0.5 * (bx_lo + bx_hi)
+    x_lo_b = torch.where(side == 0, torch.full((n,), bx_lo, device=device), torch.full((n,), bx_mid, device=device))
+    x_hi_b = torch.where(side == 0, torch.full((n,), bx_mid, device=device), torch.full((n,), bx_hi, device=device))
+    female_local = torch.zeros((n, 3), device=device)
+    female_local[:, 0] = torch.rand(n, device=device) * (x_hi_b - x_lo_b) + x_lo_b
+    female_local[:, 1] = cfg.box_contact_rear_edge_y_local
+    female_local[:, 2] = cfg.box_contact_rear_edge_z_local
+
+    lx_lo, lx_hi = cfg.lid_contact_front_edge_x_range
+    lx_mid = 0.5 * (lx_lo + lx_hi)
+    x_lo_l = torch.where(side == 0, torch.full((n,), lx_lo, device=device), torch.full((n,), lx_mid, device=device))
+    x_hi_l = torch.where(side == 0, torch.full((n,), lx_mid, device=device), torch.full((n,), lx_hi, device=device))
+    male_local = torch.zeros((n, 3), device=device)
+    male_local[:, 0] = torch.rand(n, device=device) * (x_hi_l - x_lo_l) + x_lo_l
+    male_local[:, 1] = cfg.lid_contact_front_edge_y_local
+    male_local[:, 2] = cfg.lid_contact_front_edge_z_local
+
+    r_lo, r_hi = cfg.contact_init_roll_range_deg
+    p_lo, p_hi = cfg.contact_init_pitch_range_deg
+    y_lo, y_hi = cfg.contact_init_yaw_range_deg
+    roll = torch.deg2rad(torch.rand(n, device=device) * (r_hi - r_lo) + r_lo)
+    pitch = torch.deg2rad(torch.rand(n, device=device) * (p_hi - p_lo) + p_lo)
+    yaw = torch.deg2rad(torch.rand(n, device=device) * (y_hi - y_lo) + y_lo)
+    held_quat_w = quat_mul(
+        box_quat_w,
+        quat_from_euler_xyz(roll, pitch, yaw),
+    )
+
+    _, female_w = torch_utils.tf_combine(box_quat_w, box_pos_w, ident_q, female_local)
+    male_off_w = torch_utils.quat_rotate(held_quat_w, male_local)
+    lid_pos_w = female_w - male_off_w
+
+    pose_w = torch.cat([lid_pos_w, held_quat_w], dim=-1)
+    zero_vel = torch.zeros((n, 6), device=device)
+    inner._held_asset.write_root_pose_to_sim(pose_w)
+    inner._held_asset.write_root_velocity_to_sim(zero_vel)
+    inner._held_asset.reset()
+
+    # Keep keyboard nudging in sync (broadcast env0 offsets to all envs, like RJ45 visualizer).
+    rel_p = lid_pos_w[0] - box_pos_w[0]
+    _pos_offset = [rel_p[0].item(), rel_p[1].item(), rel_p[2].item()]
+    rel_q = quat_mul(quat_conjugate(box_quat_w[0:1]), held_quat_w[0:1])
+    rr, rp, ry = euler_xyz_from_quat(rel_q)
+    _euler_offset = [rr.item(), rp.item(), ry.item()]
+
+    side0 = "LEFT" if side[0].item() == 0 else "RIGHT"
+    print(
+        "[TELEPORT -> CONTACT]  "
+        f"env0 side={side0}  "
+        f"box_pt_local(mm)=[{female_local[0,0].item()*1000:+.1f},{female_local[0,1].item()*1000:+.1f},{female_local[0,2].item()*1000:+.1f}]  "
+        f"lid_pt_local(mm)=[{male_local[0,0].item()*1000:+.1f},{male_local[0,1].item()*1000:+.1f},{male_local[0,2].item()*1000:+.1f}]  "
+        f"rpy(deg)=[{math.degrees(roll[0].item()):+.1f},{math.degrees(pitch[0].item()):+.1f},{math.degrees(yaw[0].item()):+.1f}]"
+    )
 
 
 def _poll_keys_and_move_lid(inner):
@@ -143,9 +226,9 @@ def _poll_keys_and_move_lid(inner):
     if _key(Ki.U): _euler_offset[0] += rs   # roll +
     if _key(Ki.O): _euler_offset[0] -= rs   # roll -
 
-    # Reset to success position
+    # Reset to nominal pose (slight Z lift)
     if _key(Ki.R):
-        _pos_offset   = [0.0, 0.0, 0.0]
+        _pos_offset = [0.0, 0.0, 0.015]
         _euler_offset = [0.0, 0.0, 0.0]
 
     device   = inner.device
@@ -205,10 +288,61 @@ def _get_markers() -> VisualizationMarkers:
                     radius=0.003,
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.8, 0.0)),
                 ),
+                # Contact calibration (indices 4–9)
+                "rear_full": sim_utils.SphereCfg(
+                    radius=0.0025,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 1.0)),
+                ),
+                "front_full": sim_utils.SphereCfg(
+                    radius=0.0025,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.85, 0.95)),
+                ),
+                "rear_L": sim_utils.SphereCfg(
+                    radius=0.003,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.55, 0.1)),
+                ),
+                "rear_R": sim_utils.SphereCfg(
+                    radius=0.003,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.85, 0.2, 0.9)),
+                ),
+                "front_L": sim_utils.SphereCfg(
+                    radius=0.003,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 1.0, 0.2)),
+                ),
+                "front_R": sim_utils.SphereCfg(
+                    radius=0.003,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.2, 0.55)),
+                ),
+                "split_dot": sim_utils.SphereCfg(
+                    radius=0.002,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.15, 0.15)),
+                ),
+                "kp_box_goal": sim_utils.SphereCfg(
+                    radius=0.0035,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.15, 0.95)),
+                ),
             },
         )
         _markers = VisualizationMarkers(cfg)
     return _markers
+
+
+def _mean_keypoint_dist_factory_style(inner) -> torch.Tensor:
+    """Match FactoryEnv _get_factory_rew_dict mean KP distance for box_lid_insert."""
+    device = inner.device
+    num_envs = inner.num_envs
+    ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(num_envs, -1)
+    held_pos = inner._held_asset.data.root_pos_w - inner.scene.env_origins
+    held_quat = inner._held_asset.data.root_quat_w
+    fixed_pos = inner._fixed_asset.data.root_pos_w - inner.scene.env_origins
+    fixed_quat = inner._fixed_asset.data.root_quat_w
+    n = inner.kp_lid_local.shape[1]
+    kh = torch.zeros((num_envs, n, 3), device=device)
+    kf = torch.zeros((num_envs, n, 3), device=device)
+    for i in range(n):
+        _, kh[:, i] = torch_utils.tf_combine(held_quat, held_pos, ident_q, inner.kp_lid_local[:, i])
+        _, kf[:, i] = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, inner.kp_box_local[:, i])
+    return torch.norm(kh - kf, p=2, dim=-1).mean(-1)
 
 
 def _draw_clip_hole_markers(inner):
@@ -241,16 +375,81 @@ def _draw_clip_hole_markers(inner):
         torch.ones( 2 * num_envs, dtype=torch.int32),
     ]
 
-    # Per-episode keypoints: kp_held (green=2), kp_target (yellow=3).
-    if hasattr(inner, "kp_lid_local"):
+    # Per-episode keypoints: lid (green=2), box eased Y (yellow=3), box success Y goal (purple=11).
+    if hasattr(inner, "kp_lid_local") and hasattr(inner, "kp_box_y_target"):
         n = inner.kp_lid_local.shape[1]
         for i in range(n):
-            _, kp_h = torch_utils.tf_combine(held_quat,  held_pos,  ident_q, inner.kp_lid_local[:, i])
+            _, kp_h = torch_utils.tf_combine(held_quat, held_pos, ident_q, inner.kp_lid_local[:, i])
+            _, kp_t = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, inner.kp_box_local[:, i])
+            goal_loc = torch.stack(
+                [
+                    inner.kp_lid_local[:, i, 0],
+                    inner.kp_box_y_target[:, i],
+                    inner.kp_lid_local[:, i, 2],
+                ],
+                dim=1,
+            )
+            _, kp_g = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, goal_loc)
+            translations_list.append(kp_h + env_orig)
+            translations_list.append(kp_t + env_orig)
+            translations_list.append(kp_g + env_orig)
+            marker_indices_list.append(torch.full((num_envs,), 2, dtype=torch.int32))   # kp_held
+            marker_indices_list.append(torch.full((num_envs,), 3, dtype=torch.int32))   # kp_box current
+            marker_indices_list.append(torch.full((num_envs,), 11, dtype=torch.int32))  # kp_box goal Y
+    elif hasattr(inner, "kp_lid_local"):
+        n = inner.kp_lid_local.shape[1]
+        for i in range(n):
+            _, kp_h = torch_utils.tf_combine(held_quat, held_pos, ident_q, inner.kp_lid_local[:, i])
             _, kp_t = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, inner.kp_box_local[:, i])
             translations_list.append(kp_h + env_orig)
             translations_list.append(kp_t + env_orig)
-            marker_indices_list.append(torch.full((num_envs,), 2, dtype=torch.int32))  # kp_held
-            marker_indices_list.append(torch.full((num_envs,), 3, dtype=torch.int32))  # kp_target
+            marker_indices_list.append(torch.full((num_envs,), 2, dtype=torch.int32))
+            marker_indices_list.append(torch.full((num_envs,), 3, dtype=torch.int32))
+
+    # --- Contact-init guides (box rear top edge vs lid front edge), from task cfg ---
+    tcfg = inner.cfg_task
+    bx_lo, bx_hi = tcfg.box_contact_rear_edge_x_range
+    bx_mid = 0.5 * (bx_lo + bx_hi)
+    by = float(tcfg.box_contact_rear_edge_y_local)
+    bz = float(tcfg.box_contact_rear_edge_z_local)
+    lx_lo, lx_hi = tcfg.lid_contact_front_edge_x_range
+    lx_mid = 0.5 * (lx_lo + lx_hi)
+    ly = float(tcfg.lid_contact_front_edge_y_local)
+    lz = float(tcfg.lid_contact_front_edge_z_local)
+
+    def _append_box_line(x0, x1, nseg, midx):
+        xs = torch.linspace(float(x0), float(x1), nseg, device=device)
+        for xi in xs:
+            loc = torch.tensor([[xi, by, bz]], device=device).expand(num_envs, -1)
+            _, pw = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, loc)
+            translations_list.append(pw + env_orig)
+            marker_indices_list.append(torch.full((num_envs,), midx, dtype=torch.int32))
+
+    def _append_lid_line(x0, x1, nseg, midx):
+        xs = torch.linspace(float(x0), float(x1), nseg, device=device)
+        for xi in xs:
+            loc = torch.tensor([[xi, ly, lz]], device=device).expand(num_envs, -1)
+            _, pw = torch_utils.tf_combine(held_quat, held_pos, ident_q, loc)
+            translations_list.append(pw + env_orig)
+            marker_indices_list.append(torch.full((num_envs,), midx, dtype=torch.int32))
+
+    # Full span + left/right halves (same split as factory_env contact init).
+    _append_box_line(bx_lo, bx_hi, _REAR_EDGE_SAMPLES, 4)
+    _append_lid_line(lx_lo, lx_hi, _FRONT_EDGE_SAMPLES, 5)
+    _append_box_line(bx_lo, bx_mid, max(2, _REAR_EDGE_SAMPLES // 2), 6)
+    _append_box_line(bx_mid, bx_hi, max(2, _REAR_EDGE_SAMPLES // 2), 7)
+    _append_lid_line(lx_lo, lx_mid, max(2, _FRONT_EDGE_SAMPLES // 2), 8)
+    _append_lid_line(lx_mid, lx_hi, max(2, _FRONT_EDGE_SAMPLES // 2), 9)
+
+    # Midpoint markers (red) on box rear and lid front guides.
+    loc_bm = torch.tensor([[bx_mid, by, bz]], device=device).expand(num_envs, -1)
+    _, pw_bm = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, loc_bm)
+    translations_list.append(pw_bm + env_orig)
+    marker_indices_list.append(torch.full((num_envs,), 10, dtype=torch.int32))
+    loc_lm = torch.tensor([[lx_mid, ly, lz]], device=device).expand(num_envs, -1)
+    _, pw_lm = torch_utils.tf_combine(held_quat, held_pos, ident_q, loc_lm)
+    translations_list.append(pw_lm + env_orig)
+    marker_indices_list.append(torch.full((num_envs,), 10, dtype=torch.int32))
 
     translations   = torch.cat(translations_list,   dim=0)
     marker_indices = torch.cat(marker_indices_list, dim=0)
@@ -363,6 +562,33 @@ def _print_success_info(inner, step, successes: torch.Tensor, engaged: torch.Ten
         f"  (hole targets — left: X=-25.2 Y=-44.4 Z=+25.0 mm | right: X=+24.3 Y=-44.4 Z=+25.0 mm)"
     )
 
+    # --- Progressive box KP Y (Factory reward) ---
+    if hasattr(inner, "kp_box_y_target"):
+        cfg = inner.cfg_task
+        kdist = _mean_keypoint_dist_factory_style(inner)
+        thr = float(cfg.kp_advance_threshold)
+        adv = bool((kdist[0] < thr).item())
+        y_cur = inner.kp_box_local[0, :, 1].cpu()
+        y_tgt = inner.kp_box_y_target[0].cpu()
+        dy = (y_cur - y_tgt) * 1000.0
+        n_kp = y_cur.shape[0]
+        max_dy = dy.abs().max().item()
+        mean_dy = dy.abs().mean().item()
+        k0 = min(3, n_kp)
+        y_pairs = ", ".join(
+            f"kp{i}:Ycur={y_cur[i].item()*1000:+.2f} Ytgt={y_tgt[i].item()*1000:+.2f} Δ={dy[i].item():+.2f}mm"
+            for i in range(k0)
+        )
+        print(
+            f"  --- KP GUIDE (box Y ease, RJ45-style) ---\n"
+            f"  mean_kp_dist={kdist[0].item()*1000:.3f} mm  threshold={thr*1000:.3f} mm  "
+            f"advance_active={'YES' if adv else 'no'}\n"
+            f"  y_start(cfg)={cfg.kp_advance_y_start*1000:+.2f} mm  step={cfg.kp_advance_y_step*1000:.4f} mm/step  "
+            f"|Ycur−Ytgt| mean={mean_dy:.3f} max={max_dy:.3f} mm\n"
+            f"  {y_pairs}{' ...' if n_kp > k0 else ''}\n"
+            f"  markers: GREEN=lid  YELLOW=box(current Y)  PURPLE=box(goal Y) → yellow meets purple when eased"
+        )
+
     # --- ORIENTATION CHECK ---
     fixed_r, fixed_p, fixed_y = euler_xyz_from_quat(fixed_quat[0:1])
     held_r,  held_p,  held_y  = euler_xyz_from_quat(held_quat[0:1])
@@ -405,9 +631,22 @@ def main():
     env.reset()
     _init_keyboard()
 
+    t = env_cfg.task
     print(
         "\n[CONTROLS]  Arrow=XY  Q/E=Z  I/K=pitch  J/L=yaw  U/O=roll  "
-        "Shift=5×speed  R=reset\n"
+        "Shift=5×speed  C=contact-sample  R=reset\n"
+        "[CONTACT CFG]  box rear: "
+        f"x∈{tuple(t.box_contact_rear_edge_x_range)} y={t.box_contact_rear_edge_y_local:+.4f} z={t.box_contact_rear_edge_z_local:+.4f}\n"
+        "               lid front: "
+        f"x∈{tuple(t.lid_contact_front_edge_x_range)} y={t.lid_contact_front_edge_y_local:+.4f} z={t.lid_contact_front_edge_z_local:+.4f}\n"
+        "               contact RPY jitter (deg): "
+        f"roll={tuple(t.contact_init_roll_range_deg)} pitch={tuple(t.contact_init_pitch_range_deg)} "
+        f"yaw={tuple(t.contact_init_yaw_range_deg)}\n"
+        "[MARKERS]  GREEN=lid KP  YELLOW=box KP (eased Y)  PURPLE=box KP goal Y  "
+        "WHITE/CYAN/ORANGE…=contact guides  RED dot=mid X\n"
+        "[KP Y EASE]  "
+        f"y_start={t.kp_advance_y_start*1000:+.2f} mm  step={t.kp_advance_y_step*1000:.4f} mm  "
+        f"advance_when_mean_kp_dist<{t.kp_advance_threshold*1000:.3f} mm\n"
     )
 
     # Pre-compute frozen joint state (default pose, gripper open to lid handle width).
@@ -421,8 +660,14 @@ def main():
     _frozen_joint_vel = torch.zeros_like(_frozen_joint_pos)
 
     step = 0
+    _c_last = False
     while simulation_app.is_running():
         with torch.inference_mode():
+            c_now = _key(Ki.C)
+            if c_now and not _c_last:
+                _teleport_contact(inner)
+            _c_last = c_now
+
             actions = torch.zeros(env.action_space.shape, device=inner.device)
             _, _, done, trunc, _ = env.step(actions)
             step += 1

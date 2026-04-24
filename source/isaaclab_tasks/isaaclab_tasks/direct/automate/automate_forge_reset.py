@@ -6,7 +6,7 @@
 """Forge-style episode reset: fixed randomization, IK (near/far/contact), grasp, per-task keypoints.
 
 Mirrors ``factory_env.FactoryEnv.randomize_initial_state`` / ``_reset_idx`` for
-``box_lid_insert``, ``rj45_insert``, ``bnc_insert`` without duplicating fixed-asset
+``box_lid_insert``, ``rj45_insert``, ``bnc_insert`` (incl. contact / far / near init) without duplicating fixed-asset
 logic (delegates to ``AssemblyEnv.randomize_fixed_initial_state``).
 """
 
@@ -49,10 +49,13 @@ def randomize_initial_state_forge(env, env_ids: torch.Tensor) -> None:
         _is_near[env_ids[_near_mask]] = True
 
     use_rj45_contact_init = cfg.name == "rj45_insert" and _init_mode == "contact"
+    use_box_contact_init = cfg.name == "box_lid_insert" and _init_mode == "contact"
+    use_bnc_contact_init = cfg.name == "bnc_insert" and _init_mode == "contact"
+    use_contact_style_init = use_rj45_contact_init or use_box_contact_init or use_bnc_contact_init
     held_to_fingertip_quat = held_to_fingertip_pos = None
-    if use_rj45_contact_init:
+    if use_contact_style_init:
         flip_z_quat = torch.tensor([0.0, 0.0, 1.0, 0.0], device=device).unsqueeze(0).repeat(num_envs, 1)
-        if getattr(env.cfg.ctrl, "held_body_name", "") == "link_rj45":
+        if getattr(env.cfg.ctrl, "held_body_name", "") in ("link_rj45", "link_lid", "link_bnc"):
             fingertip_inv_quat, fingertip_inv_pos = torch_utils.tf_inverse(
                 env.fingertip_midpoint_quat,
                 env.fingertip_midpoint_pos,
@@ -85,7 +88,7 @@ def randomize_initial_state_forge(env, env_ids: torch.Tensor) -> None:
 
         above_fixed_pos = fixed_tip_pos.clone()
         above_fixed_pos[:, 2] += cfg.hand_init_pos[2]
-        if use_rj45_contact_init:
+        if use_contact_style_init:
             ident_n = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(n_bad, -1)
 
             roll_lo, roll_hi = cfg.contact_init_roll_range_deg
@@ -94,29 +97,80 @@ def randomize_initial_state_forge(env, env_ids: torch.Tensor) -> None:
             roll = torch.deg2rad(torch.rand(n_bad, device=device) * (roll_hi - roll_lo) + roll_lo)
             pitch = torch.deg2rad(torch.rand(n_bad, device=device) * (pitch_hi - pitch_lo) + pitch_lo)
             yaw = torch.deg2rad(torch.rand(n_bad, device=device) * (yaw_hi - yaw_lo) + yaw_lo)
+            if use_bnc_contact_init:
+                yaw = yaw + torch.randint(0, 2, (n_bad,), device=device).float() * torch.pi
             held_contact_quat = torch_utils.quat_mul(
                 env.fixed_quat[bad_envs],
                 torch_utils.quat_from_euler_xyz(roll, pitch, yaw),
             )
 
             female_point_local = torch.zeros((n_bad, 3), device=device)
-            x_lo, x_hi = cfg.female_rear_edge_x_range_local
-            female_point_local[:, 0] = torch.rand(n_bad, device=device) * (x_hi - x_lo) + x_lo
-            female_point_local[:, 1] = cfg.female_rear_edge_y_local
-            female_point_local[:, 2] = cfg.female_rear_edge_z_local
+            male_point_local = torch.zeros((n_bad, 3), device=device)
+            if use_rj45_contact_init:
+                x_lo, x_hi = cfg.female_rear_edge_x_range_local
+                female_point_local[:, 0] = torch.rand(n_bad, device=device) * (x_hi - x_lo) + x_lo
+                female_point_local[:, 1] = cfg.female_rear_edge_y_local
+                female_point_local[:, 2] = cfg.female_rear_edge_z_local
+                x_lo, x_hi = cfg.male_bottom_patch_x_range_local
+                y_lo, y_hi = cfg.male_bottom_patch_y_range_local
+                male_point_local[:, 0] = torch.rand(n_bad, device=device) * (x_hi - x_lo) + x_lo
+                male_point_local[:, 1] = torch.rand(n_bad, device=device) * (y_hi - y_lo) + y_lo
+                male_point_local[:, 2] = cfg.male_bottom_patch_z_local
+            elif use_bnc_contact_init:
+                fxl, fxh = cfg.bnc_contact_init_female_x_range
+                fyl, fyh = cfg.bnc_contact_init_female_y_range
+                female_point_local[:, 0] = torch.rand(n_bad, device=device) * (fxh - fxl) + fxl
+                female_point_local[:, 1] = torch.rand(n_bad, device=device) * (fyh - fyl) + fyl
+                female_point_local[:, 2] = cfg.bnc_contact_init_female_z_local
+                mxl, mxh = cfg.bnc_contact_init_male_x_range
+                myl, myh = cfg.bnc_contact_init_male_y_range
+                male_point_local[:, 0] = torch.rand(n_bad, device=device) * (mxh - mxl) + mxl
+                male_point_local[:, 1] = torch.rand(n_bad, device=device) * (myh - myl) + myl
+                male_point_local[:, 2] = cfg.bnc_contact_init_male_z_local
+            else:
+                side = torch.randint(0, 2, (n_bad,), device=device)
+                bx_lo, bx_hi = cfg.box_contact_rear_edge_x_range
+                bx_mid = 0.5 * (bx_lo + bx_hi)
+                x_lo_b = torch.where(
+                    side == 0,
+                    torch.full((n_bad,), bx_lo, device=device),
+                    torch.full((n_bad,), bx_mid, device=device),
+                )
+                x_hi_b = torch.where(
+                    side == 0,
+                    torch.full((n_bad,), bx_mid, device=device),
+                    torch.full((n_bad,), bx_hi, device=device),
+                )
+                female_point_local[:, 0] = (
+                    torch.rand(n_bad, device=device) * (x_hi_b - x_lo_b) + x_lo_b
+                )
+                female_point_local[:, 1] = cfg.box_contact_rear_edge_y_local
+                female_point_local[:, 2] = cfg.box_contact_rear_edge_z_local
+
+                lx_lo, lx_hi = cfg.lid_contact_front_edge_x_range
+                lx_mid = 0.5 * (lx_lo + lx_hi)
+                x_lo_l = torch.where(
+                    side == 0,
+                    torch.full((n_bad,), lx_lo, device=device),
+                    torch.full((n_bad,), lx_mid, device=device),
+                )
+                x_hi_l = torch.where(
+                    side == 0,
+                    torch.full((n_bad,), lx_mid, device=device),
+                    torch.full((n_bad,), lx_hi, device=device),
+                )
+                male_point_local[:, 0] = (
+                    torch.rand(n_bad, device=device) * (x_hi_l - x_lo_l) + x_lo_l
+                )
+                male_point_local[:, 1] = cfg.lid_contact_front_edge_y_local
+                male_point_local[:, 2] = cfg.lid_contact_front_edge_z_local
+
             _, female_point_world = torch_utils.tf_combine(
                 env.fixed_quat[bad_envs],
                 env.fixed_pos[bad_envs],
                 ident_n,
                 female_point_local,
             )
-
-            male_point_local = torch.zeros((n_bad, 3), device=device)
-            x_lo, x_hi = cfg.male_bottom_patch_x_range_local
-            y_lo, y_hi = cfg.male_bottom_patch_y_range_local
-            male_point_local[:, 0] = torch.rand(n_bad, device=device) * (x_hi - x_lo) + x_lo
-            male_point_local[:, 1] = torch.rand(n_bad, device=device) * (y_hi - y_lo) + y_lo
-            male_point_local[:, 2] = cfg.male_bottom_patch_z_local
 
             held_contact_pos = female_point_world - torch_utils.quat_rotate(held_contact_quat, male_point_local)
             fingertip_target_quat, fingertip_target_pos = torch_utils.tf_combine(
@@ -333,7 +387,15 @@ def reset_forge_keypoints_after_randomize(env, env_ids: torch.Tensor) -> None:
         nr = cfg.num_reset_kp
         env.kp_bnc_local[env_ids] = 0.0
         r = torch.rand((len(env_ids), nr), device=device)
-        env.kp_bnc_local[env_ids, :nr, 2] = r * 0.077
+        z_c = float(getattr(cfg, "bnc_kp_z_center", 0.055))
+        z_hs = float(getattr(cfg, "bnc_kp_z_half_spread", 0.024))
+        env.kp_bnc_local[env_ids, :nr, 2] = z_c + (r - 0.5) * (2.0 * z_hs)
+        env.kp_bnc_fixed_local[env_ids] = env.kp_bnc_local[env_ids].clone()
+        z_base = float(getattr(cfg, "bnc_kp_socket_z_init_extra", 0.0))
+        z_hi = float(getattr(cfg, "bnc_kp_socket_z_above_engage_m", 0.0))
+        z_bump = z_base + z_hi
+        if z_bump != 0.0:
+            env.kp_bnc_fixed_local[env_ids, :nr, 2] += z_bump
 
     if cfg.name == "box_lid_insert":
         nr = cfg.num_reset_extra_kp
@@ -364,3 +426,6 @@ def reset_forge_keypoints_after_randomize(env, env_ids: torch.Tensor) -> None:
             spare_kp = left_clip.unsqueeze(0).unsqueeze(0).expand(len(env_ids), spare, -1)
             for buf in (env.kp_lid_local, env.kp_box_local):
                 buf[env_ids, 2 + nr : n_total] = spare_kp
+
+        env.kp_box_y_target[env_ids] = env.kp_box_local[env_ids, :, 1].clone()
+        env.kp_box_local[env_ids, :, 1] = cfg.kp_advance_y_start

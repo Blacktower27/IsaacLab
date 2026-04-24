@@ -86,6 +86,8 @@ class FactoryTask:
     # Fixed-asset height fraction for which different bonuses are rewarded (see individual tasks).
     success_threshold: float = 0.04
     engage_threshold: float = 0.9
+    # If True, FactoryEnv._get_dones ends the episode (terminated) when success criteria are met.
+    terminate_on_success: bool = False
 
 
 @configclass

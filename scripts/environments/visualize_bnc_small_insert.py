@@ -3,8 +3,8 @@
 The male plug is moved directly via keyboard — no robot physics involved.
 Use this to verify:
   1. Keypoint positions (standard Z-axis keypoints) move toward target at socket opening
-  2. Engage fires when plug tip is within 4mm XY, <40mm above opening, yaw<20 deg, tilt<15 deg
-  3. Success fires when tip is >=7.5mm inside socket AND xy<3mm
+  2. Engage: |XY|<4 mm, Z per cfg, π-sym yaw (~10°), tilt<15°
+  3. Success: tip vs opening Z per cfg AND |XY|<3 mm (no yaw)
 
 BNC Small geometry (metres, post-STL->USD 0.001 scale, Z-up no rotation):
   Female (socket): USD origin 35mm above base, opening at USD_origin + Z = +0.025 m
@@ -19,12 +19,15 @@ Keyboard controls:
   U / O            -- roll  +/-
   Hold Shift       -- 5x speed
   F                -- ENGAGE position: tip 30 mm above socket opening, aligned
-  G                -- SUCCESS position: tip at success-threshold depth inside socket
+  G                -- SUCCESS position: tip at effective success z_disp (cfg thresholds)
   R                -- ORIGIN-COINCIDE: place plug origin at socket origin
 
 Coloured sphere markers (updated every frame):
   BLUE   -- connector tip  (plug local [0,0,+0.036235])
   ORANGE -- socket opening centre  (socket local [0,0,+0.025])
+Thin box markers (contact-init sampling ranges in each body frame, from task cfg):
+  YELLOW  -- bnc_contact_init_female_*  (Z fixed, XY ranges) in socket USD frame
+  MAGENTA -- bnc_contact_init_male_*  (Z at plug tip +Z, XY on mating face) in plug USD frame
 
 Usage
 -----
@@ -83,13 +86,32 @@ _OPENING_LOCAL = (0.0, 0.0,  0.025)     # socket opening centre in socket USD fr
 #   F (ENGAGE)  = tip 30 mm above socket opening
 #     plug_origin_z = socket_opening_z + 0.030 - 0.036235
 #                   = socket_origin_z  + 0.025 + 0.030 - 0.036235 = socket_origin_z + 0.018765
-#   G (SUCCESS) = tip at success threshold depth = height * success_threshold = 0.025 * (-0.3) = -0.0075
-#     plug_origin_z = socket_opening_z - 0.0075 - 0.036235
-#                   = socket_origin_z  + 0.025 - 0.0075 - 0.036235 = socket_origin_z - 0.018735
+#   G (SUCCESS) = tip z_disp = min(height*success_threshold, -bnc_success_min_depth_m) vs opening (see cfg);
+#     plug_origin Z offset from socket origin = z_disp - (tip_local_z - opening_local_z)
 #   R (ORIGINS) = origins coincide: plug_origin_z = socket_origin_z -> offset = 0
 _Z_OFFSET_ENGAGE  =  0.018765   # F key: 30mm above socket opening
-_Z_OFFSET_SUCCESS = -0.018735   # G key: at success threshold depth
 _Z_OFFSET_ORIGINS =  0.00000    # R key: plug origin = socket origin
+
+
+def _bnc_tip_minus_opening_z_m(cfg_task) -> float:
+    """Aligned bodies: tip Z − opening Z = plug_origin_z_offset + (tip_local_z − opening_local_z)."""
+    return float(cfg_task.held_asset_cfg.base_height) - float(cfg_task.fixed_asset_cfg.height)
+
+
+def _bnc_success_z_disp_threshold_m(cfg_task) -> float:
+    """Same as FactoryEnv BNC SUCCESS branch: z_disp must be <= this (m; negative = inside opening)."""
+    h = float(cfg_task.fixed_asset_cfg.height)
+    st = float(cfg_task.success_threshold)
+    ht = h * st
+    md = float(getattr(cfg_task, "bnc_success_min_depth_m", 0.0))
+    if md > 0.0:
+        ht = min(ht, -md)
+    return ht
+
+
+def _bnc_plug_origin_z_offset_for_tip_z_disp_m(cfg_task, z_disp_m: float) -> float:
+    """Socket-origin Z offset for plug root so tip−opening z_disp equals z_disp_m (aligned Z)."""
+    return z_disp_m - _bnc_tip_minus_opening_z_m(cfg_task)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +214,95 @@ def _poll_keys_and_move_plug(inner):
 # Visualisation markers
 # ---------------------------------------------------------------------------
 _markers: VisualizationMarkers | None = None
+_contact_range_markers: VisualizationMarkers | None = None
+
+_SLAB_DZ = 0.00035  # thin slab thickness (m) for range overlays
+
+
+def _get_contact_range_markers() -> VisualizationMarkers:
+    global _contact_range_markers
+    if _contact_range_markers is None:
+        _contact_range_markers = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path="/Visuals/BNCSmallContactInitRanges",
+                markers={
+                    "female_slab": sim_utils.CuboidCfg(
+                        size=(1.0, 1.0, 1.0),
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.95, 0.85, 0.15),
+                        ),
+                    ),
+                    "male_slab": sim_utils.CuboidCfg(
+                        size=(1.0, 1.0, 1.0),
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.85, 0.15, 0.75),
+                        ),
+                    ),
+                },
+            )
+        )
+    return _contact_range_markers
+
+
+def _draw_contact_init_ranges(inner):
+    """Draw axis-aligned XY ranges: female at opening Z, male at plug tip Z (+Z, insertion end)."""
+    cfg = inner.cfg_task
+    fx = getattr(cfg, "bnc_contact_init_female_x_range", [-0.008, 0.008])
+    fy = getattr(cfg, "bnc_contact_init_female_y_range", [-0.008, 0.008])
+    fz = getattr(cfg, "bnc_contact_init_female_z_local", 0.025)
+    mx = getattr(cfg, "bnc_contact_init_male_x_range", [-0.01035, 0.01035])
+    my = getattr(cfg, "bnc_contact_init_male_y_range", [-0.00915, 0.00915])
+    mz = getattr(cfg, "bnc_contact_init_male_z_local", 0.036235)
+
+    device = inner.device
+    num_envs = inner.num_envs
+    m = _get_contact_range_markers()
+
+    held_pos = inner._held_asset.data.root_pos_w - inner.scene.env_origins
+    held_quat = inner._held_asset.data.root_quat_w
+    fixed_pos = inner._fixed_asset.data.root_pos_w - inner.scene.env_origins
+    fixed_quat = inner._fixed_asset.data.root_quat_w
+    env_orig = inner.scene.env_origins
+    ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(num_envs, -1)
+
+    cxf = 0.5 * (float(fx[0]) + float(fx[1]))
+    cyf = 0.5 * (float(fy[0]) + float(fy[1]))
+    cmx = 0.5 * (float(mx[0]) + float(mx[1]))
+    cmy = 0.5 * (float(my[0]) + float(my[1]))
+    local_f = torch.tensor([cxf, cyf, float(fz)], device=device, dtype=torch.float32).unsqueeze(0).expand(
+        num_envs, -1
+    )
+    local_m = torch.tensor([cmx, cmy, float(mz)], device=device, dtype=torch.float32).unsqueeze(0).expand(
+        num_envs, -1
+    )
+    _, pos_f = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, local_f)
+    _, pos_m = torch_utils.tf_combine(held_quat, held_pos, ident_q, local_m)
+
+    sxf, syf = float(fx[1]) - float(fx[0]), float(fy[1]) - float(fy[0])
+    sxm, sym = float(mx[1]) - float(mx[0]), float(my[1]) - float(my[0])
+    d = _SLAB_DZ
+    scale_f = (
+        torch.tensor([sxf, syf, d], device=device, dtype=torch.float32)
+        .unsqueeze(0)
+        .expand(num_envs, -1)
+    )
+    scale_m = (
+        torch.tensor([sxm, sym, d], device=device, dtype=torch.float32)
+        .unsqueeze(0)
+        .expand(num_envs, -1)
+    )
+
+    trans = torch.cat([pos_f + env_orig, pos_m + env_orig], dim=0)
+    quat = torch.cat([fixed_quat, held_quat], dim=0)
+    scales = torch.cat([scale_f, scale_m], dim=0)
+    marker_indices = torch.cat(
+        [
+            torch.zeros(num_envs, dtype=torch.int32, device=device),
+            torch.ones(num_envs, dtype=torch.int32, device=device),
+        ],
+        dim=0,
+    )
+    m.visualize(translations=trans, orientations=quat, scales=scales, marker_indices=marker_indices)
 
 
 def _get_markers() -> VisualizationMarkers:
@@ -258,12 +369,13 @@ def _draw_markers(inner):
             inner.cfg_task.fixed_asset_cfg, num_envs, device,
         )
         n_kp = inner.kp_bnc_local.shape[1]
+        kp_t_loc = getattr(inner, "kp_bnc_fixed_local", inner.kp_bnc_local)
         for i in range(n_kp):
             _, kp_plug_env   = torch_utils.tf_combine(
                 held_base_quat,   held_base_pos,   ident_q, inner.kp_bnc_local[:, i]
             )
             _, kp_target_env = torch_utils.tf_combine(
-                target_base_quat, target_base_pos, ident_q, inner.kp_bnc_local[:, i]
+                target_base_quat, target_base_pos, ident_q, kp_t_loc[:, i]
             )
             translations.append(kp_plug_env   + env_orig)
             translations.append(kp_target_env + env_orig)
@@ -300,14 +412,24 @@ def _print_geometry(inner, step, successes, engaged):
 
     ident_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).unsqueeze(0).expand(num_envs, -1)
 
-    tip_loc     = torch.tensor(_TIP_LOCAL,     device=device).expand(num_envs, -1).clone()
-    opening_loc = torch.tensor(_OPENING_LOCAL, device=device).expand(num_envs, -1).clone()
-    _, tip_w     = torch_utils.tf_combine(held_quat,  held_pos,  ident_q, tip_loc)
-    _, opening_w = torch_utils.tf_combine(fixed_quat, fixed_pos, ident_q, opening_loc)
+    # Must match FactoryEnv._get_curr_successes (bnc_insert): held_base vs opening at fixed_cfg.height.
+    held_base_pos, _held_base_quat = factory_utils.get_held_base_pose(
+        held_pos, held_quat, inner.cfg_task.name,
+        inner.cfg_task.fixed_asset_cfg, num_envs, device,
+    )
+    socket_opening_local = torch.zeros((num_envs, 3), device=device)
+    socket_opening_local[:, 2] = inner.cfg_task.fixed_asset_cfg.height
+    _, socket_opening_world = torch_utils.tf_combine(
+        fixed_quat, fixed_pos, ident_q, socket_opening_local
+    )
+    bdelta  = (held_base_pos[0] - socket_opening_world[0]).cpu()
+    xy_dist = bdelta[:2].norm().item() * 1000
+    z_disp  = bdelta[2].item() * 1000
 
-    delta   = (tip_w[0] - opening_w[0]).cpu()
-    xy_dist = delta[:2].norm().item() * 1000
-    z_disp  = delta[2].item() * 1000
+    # Marker mesh tip vs held_base (BNC: should coincide).
+    tip_loc = torch.tensor(_TIP_LOCAL, device=device).expand(num_envs, -1).clone()
+    _, tip_w = torch_utils.tf_combine(held_quat, held_pos, ident_q, tip_loc)
+    tip_skew_mm = (tip_w[0] - held_base_pos[0]).norm().item() * 1000
 
     orig_delta = (held_pos[0] - fixed_pos[0]).cpu()
     orig_xy    = orig_delta[:2].norm().item() * 1000
@@ -316,13 +438,73 @@ def _print_geometry(inner, step, successes, engaged):
     off_mm  = [_pos_xy_offset[0]*1000, _pos_xy_offset[1]*1000, _pos_z_offset*1000]
     eul_deg = [math.degrees(x) for x in _euler_offset]
 
+    _zmax_m = float(getattr(inner.cfg_task, "bnc_engage_z_max_above_opening", 0.040))
+    _zmin_m = float(getattr(inner.cfg_task, "bnc_engage_min_depth_m", 0.0))
+    _zmax = _zmax_m * 1000
+    _engage_z = (
+        f"Z: tip ≤{_zmax:.0f}mm above opening AND ≥{_zmin_m*1000:.1f}mm inside"
+        if _zmin_m > 0.0
+        else f"Z: tip ≤{_zmax:.0f}mm above opening (no min depth)"
+    )
+
+    _succ_z_m = _bnc_success_z_disp_threshold_m(inner.cfg_task)
+    _succ_z_mm = _succ_z_m * 1000
+    _base_succ_mm = inner.cfg_task.fixed_asset_cfg.height * inner.cfg_task.success_threshold * 1000
+    _succ_md_mm = float(getattr(inner.cfg_task, "bnc_success_min_depth_m", 0.0)) * 1000
+    _succ_line = (
+        f"tip Z ≤ {_succ_z_mm:.1f} mm vs opening (stricter of {_base_succ_mm:.1f} mm & −{_succ_md_mm:.1f} mm depth)"
+        if _succ_md_mm > 0.0
+        else f"tip Z ≤ {_succ_z_mm:.1f} mm vs opening (height×success_threshold)"
+    )
+
+    z_disp_m = z_disp / 1000.0
+    xy_dist_m = xy_dist / 1000.0
+    eng_z_ok = z_disp_m < _zmax_m and (_zmin_m <= 0.0 or z_disp_m <= -_zmin_m)
+    _succ_eps = float(getattr(inner.cfg_task, "bnc_success_z_eps_m", 1e-5))
+    succ_z_ok = z_disp_m <= _succ_z_m + _succ_eps
+    xy_eng_ok = xy_dist_m < 0.004
+    xy_succ_ok = xy_dist_m < 0.003
+
+    _, _, plug_yaw = torch_utils.get_euler_xyz(held_quat[0:1])
+    _, _, sock_yaw = torch_utils.get_euler_xyz(fixed_quat[0:1])
+    yaw_raw = ((plug_yaw - sock_yaw + math.pi) % (2 * math.pi) - math.pi).item()
+    yaw_sym = min(abs(yaw_raw), math.pi - abs(yaw_raw))
+    yaw_ok = yaw_sym < 0.175
+    _ep0 = hasattr(inner, "ep_succeeded") and inner.ep_succeeded[0].item() > 0
+    yaw_gate = yaw_ok or _ep0
+
+    plug_z_loc = torch.zeros((1, 3), device=device)
+    plug_z_loc[0, 2] = -1.0
+    plug_z_w = torch_utils.quat_rotate(held_quat[0:1], plug_z_loc)
+    tilt_ok = (-plug_z_w[0, 2]).item() > 0.966
+
+    engage_all = eng_z_ok and xy_eng_ok and yaw_gate and tilt_ok
+    success_all = succ_z_ok and xy_succ_ok
+
+    env_eng = bool(engaged[0].item())
+    env_suc = bool(successes[0].item())
+    mismatch = (engage_all != env_eng) or (success_all != env_suc)
+    mismatch_note = (
+        f"\n  [!] instant gates != inner._get_curr_successes  env ENGAGE={env_eng} SUCCESS={env_suc}"
+        if mismatch
+        else ""
+    )
+    skew_note = (
+        f"\n  mesh tip vs held_base skew: {tip_skew_mm:.4f} mm"
+        if tip_skew_mm > 0.05
+        else ""
+    )
+
     print(
         f"  offset from socket: X={off_mm[0]:+.1f} Y={off_mm[1]:+.1f} Z={off_mm[2]:+.1f} mm"
         f"  euler=[{eul_deg[0]:+.1f},{eul_deg[1]:+.1f},{eul_deg[2]:+.1f}] deg\n"
-        f"  tip -> opening: XY={xy_dist:.2f} mm  Z={z_disp:+.2f} mm (<0=inside socket)\n"
+        f"  held_base->opening (Factory parity): XY={xy_dist:.2f} mm  Z={z_disp:+.2f} mm (<0=inside)\n"
         f"  origin -> origin: XY={orig_xy:.2f} mm  Z={orig_z:+.2f} mm\n"
-        f"  ENGAGE: |XY|<4mm, Z<40mm, |yaw|<20 deg, tilt<15 deg  |  "
-        f"SUCCESS: Z<{inner.cfg_task.fixed_asset_cfg.height * inner.cfg_task.success_threshold * 1000:.1f} mm AND |XY|<3mm"
+        f"  ENGAGE: |XY|<4mm, {_engage_z}, π-sym yaw<~10°, tilt<15°  |  "
+        f"SUCCESS: {_succ_line} AND |XY|<3mm (no yaw)\n"
+        f"  instant (env0): ENGAGE={engage_all} (Z:{eng_z_ok} XY:{xy_eng_ok} yaw:{yaw_gate} tilt:{tilt_ok})  "
+        f"SUCCESS={success_all} (Z:{succ_z_ok} XY:{xy_succ_ok})"
+        f"{skew_note}{mismatch_note}"
     )
 
     # --- Keypoint distances ---
@@ -336,13 +518,14 @@ def _print_geometry(inner, step, successes, engaged):
             inner.cfg_task.fixed_asset_cfg, num_envs, device,
         )
         n_kp = inner.kp_bnc_local.shape[1]
+        kp_t_loc = getattr(inner, "kp_bnc_fixed_local", inner.kp_bnc_local)
         dists_mm = []
         for i in range(n_kp):
             _, kp_h = torch_utils.tf_combine(
                 held_base_quat_kp, held_base_pos_kp, ident_q, inner.kp_bnc_local[:, i]
             )
             _, kp_t = torch_utils.tf_combine(
-                target_base_quat_kp, target_base_pos_kp, ident_q, inner.kp_bnc_local[:, i]
+                target_base_quat_kp, target_base_pos_kp, ident_q, kp_t_loc[:, i]
             )
             dists_mm.append((kp_h[0] - kp_t[0]).norm().item() * 1000)
         avg_dist = sum(dists_mm) / len(dists_mm)
@@ -387,12 +570,28 @@ def main():
     env.reset()
     _init_keyboard()
 
+    t = inner.cfg_task
+    cinit = ""
+    if getattr(t, "bnc_contact_init_female_z_local", None) is not None:
+        fxl, fxh = t.bnc_contact_init_female_x_range
+        fyl, fyh = t.bnc_contact_init_female_y_range
+        mxl, mxh = t.bnc_contact_init_male_x_range
+        myl, myh = t.bnc_contact_init_male_y_range
+        cinit = (
+            f"\n[contact_init cfg — tune in forge_tasks_cfg.py: ForgeBNCSmallInsert]\n"
+            f"  female: z_local={t.bnc_contact_init_female_z_local*1000:.3f} mm  "
+            f"x=[{fxl*1000:.2f},{fxh*1000:.2f}] mm  y=[{fyl*1000:.2f},{fyh*1000:.2f}] mm\n"
+            f"  male:   z_local={t.bnc_contact_init_male_z_local*1000:.3f} mm  "
+            f"x=[{mxl*1000:.2f},{mxh*1000:.2f}] mm  y=[{myl*1000:.2f},{myh*1000:.2f}] mm\n"
+            f"  slabs: YELLOW=female  MAGENTA=male  (axis-aligned box, Z fixed in each body frame)\n"
+        )
     print(
         f"\n[ENV] {env_id}\n"
         "[CONTROLS]  Arrow=XY  Q/E=Z  I/K=pitch  J/L=yaw  U/O=roll  Shift=5x\n"
         "[TELEPORT]  R=origin-coincide  F=engage  G=success\n"
         "[MARKERS]   BLUE=tip  ORANGE=opening\n"
-        f"  TIP_LOCAL={[x*1000 for x in _TIP_LOCAL]} mm  OPENING_LOCAL={[x*1000 for x in _OPENING_LOCAL]} mm\n"
+        f"  TIP_LOCAL={[x*1000 for x in _TIP_LOCAL]} mm  OPENING_LOCAL={[x*1000 for x in _OPENING_LOCAL]} mm"
+        f"{cinit}"
     )
 
     _frozen_joint_pos = inner._robot.data.default_joint_pos.clone()
@@ -415,7 +614,9 @@ def main():
             if f_now and not _f_last:
                 _teleport(_Z_OFFSET_ENGAGE,  "ENGAGE (tip 30mm above opening)")
             if g_now and not _g_last:
-                _teleport(_Z_OFFSET_SUCCESS, "SUCCESS threshold depth")
+                zt = _bnc_success_z_disp_threshold_m(inner.cfg_task)
+                off = _bnc_plug_origin_z_offset_for_tip_z_disp_m(inner.cfg_task, zt)
+                _teleport(off, f"SUCCESS (tip−opening z_disp={zt*1000:.1f} mm)")
             _r_last, _f_last, _g_last = r_now, f_now, g_now
 
             actions = torch.zeros(env.action_space.shape, device=inner.device)
@@ -428,6 +629,7 @@ def main():
 
             _poll_keys_and_move_plug(inner)
             _draw_markers(inner)
+            _draw_contact_init_ranges(inner)
 
             engaged   = inner._get_curr_successes(success_threshold=inner.cfg_task.engage_threshold)
             successes = inner._get_curr_successes(success_threshold=inner.cfg_task.success_threshold)

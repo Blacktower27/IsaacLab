@@ -282,6 +282,7 @@ class AssemblyEnv(DirectRLEnv):
             n = self._forge_kp_n
             self.kp_lid_local = torch.zeros((self.num_envs, n, 3), device=self.device)
             self.kp_box_local = torch.zeros((self.num_envs, n, 3), device=self.device)
+            self.kp_box_y_target = torch.zeros((self.num_envs, n), device=self.device)
         elif self.cfg_task.name == "rj45_insert":
             self.kp_rj45_female_z_init = self.cfg_task.female_rear_edge_z_local
             n = self.cfg_task.num_reset_kp
@@ -290,6 +291,7 @@ class AssemblyEnv(DirectRLEnv):
         elif self.cfg_task.name == "bnc_insert":
             n = max(self.cfg_task.num_reset_kp, self.cfg_task.num_success_kp)
             self.kp_bnc_local = torch.zeros((self.num_envs, n, 3), device=self.device)
+            self.kp_bnc_fixed_local = torch.zeros((self.num_envs, n, 3), device=self.device)
 
     def _update_forge_keypoints_and_dist(self):
         ident = self.identity_quat
@@ -335,7 +337,7 @@ class AssemblyEnv(DirectRLEnv):
                     held_base_quat_kp, held_base_pos_kp, ident, self.kp_bnc_local[:, i]
                 )
                 _, self.keypoints_fixed[:, i] = torch_utils.tf_combine(
-                    target_base_quat_kp, target_base_pos_kp, ident, self.kp_bnc_local[:, i]
+                    target_base_quat_kp, target_base_pos_kp, ident, self.kp_bnc_fixed_local[:, i]
                 )
 
         self.keypoint_dist = torch.norm(self.keypoints_held - self.keypoints_fixed, p=2, dim=-1).mean(-1)
@@ -345,6 +347,27 @@ class AssemblyEnv(DirectRLEnv):
             if close.any():
                 self.kp_rj45_female_local[close, :, 2] -= self.cfg_task.kp_advance_step
                 self.kp_rj45_female_local[:, :, 2].clamp_(min=self.cfg_task.kp_advance_z_limit)
+
+        if self.cfg_task.name == "box_lid_insert":
+            close = self.keypoint_dist < self.cfg_task.kp_advance_threshold
+            if close.any():
+                step = self.cfg_task.kp_advance_y_step
+                cur = self.kp_box_local[:, :, 1]
+                tgt = self.kp_box_y_target
+                diff = tgt - cur
+                delta = torch.sign(diff) * torch.minimum(diff.abs(), torch.full_like(diff, step))
+                self.kp_box_local[close, :, 1] = cur[close] + delta[close]
+
+        if self.cfg_task.name == "bnc_insert":
+            nr = self.cfg_task.num_reset_kp
+            thr = float(getattr(self.cfg_task, "bnc_kp_advance_threshold", 0.005))
+            step = float(getattr(self.cfg_task, "bnc_kp_advance_step", 0.0002))
+            close = self.keypoint_dist < thr
+            if close.any():
+                self.kp_bnc_fixed_local[close, :nr, 2] -= step
+                self.kp_bnc_fixed_local[:, :nr, 2] = torch.maximum(
+                    self.kp_bnc_fixed_local[:, :nr, 2], self.kp_bnc_local[:, :nr, 2]
+                )
 
     def _load_assembly_info(self):
         """Load grasp pose and disassembly distance for plugs in each environment."""
@@ -795,6 +818,27 @@ class AssemblyEnv(DirectRLEnv):
         """Update intermediate values used for rewards and observations."""
         self._compute_intermediate_values(dt=self.physics_dt)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        if self._is_forge_task and bool(getattr(self.cfg_task, "terminate_on_success", False)):
+            st = float(self.cfg_task.success_threshold)
+            success_now = get_curr_successes_forge(
+                self.cfg_task,
+                self.held_pos,
+                self.held_quat,
+                self.fixed_pos,
+                self.fixed_quat,
+                self.held_base_pos,
+                self.ep_succeeded,
+                self.num_envs,
+                self.device,
+                st,
+            )
+            if self.cfg_task.name == "bnc_insert" and not bool(
+                getattr(self.cfg_task, "bnc_apply_success_criteria", True)
+            ):
+                success_now = torch.zeros(
+                    (self.num_envs,), dtype=torch.bool, device=self.device
+                )
+            return success_now, time_out & ~success_now
         return time_out, time_out
 
     def _get_curr_successes(self, success_threshold, check_rot=False):
@@ -842,14 +886,16 @@ class AssemblyEnv(DirectRLEnv):
                 self.device,
                 st,
             )
+            if self.cfg_task.name == "bnc_insert" and not bool(
+                getattr(self.cfg_task, "bnc_apply_success_criteria", True)
+            ):
+                curr_successes = torch.zeros(
+                    (self.num_envs,), dtype=torch.bool, device=self.device
+                )
             first_success = torch.logical_and(curr_successes, self.ep_succeeded == 0)
             first_success_ids = first_success.nonzero(as_tuple=False).squeeze(-1)
-            if self.cfg_task.name == "bnc_insert" and len(first_success_ids) > 0:
-                ns = self.cfg_task.num_success_kp
-                r = torch.rand((len(first_success_ids), ns, 3), device=self.device)
-                self.kp_bnc_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.022 - 0.011
-                self.kp_bnc_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.022 - 0.011
-                self.kp_bnc_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.030
+            if self.cfg_task.name == "bnc_insert" and curr_successes.any():
+                self.kp_bnc_fixed_local[curr_successes] = self.kp_bnc_local[curr_successes].clone()
             if self.cfg_task.name == "box_lid_insert" and len(first_success_ids) > 0:
                 ns = self.cfg_task.num_success_extra_kp
                 kp = torch.rand((len(first_success_ids), ns, 3), device=self.device)
@@ -858,6 +904,9 @@ class AssemblyEnv(DirectRLEnv):
                 kp[:, :, 2] = kp[:, :, 2] * 0.0112 + 0.0188
                 self.kp_lid_local[first_success_ids, 2 : 2 + ns] = kp
                 self.kp_box_local[first_success_ids, 2 : 2 + ns] = kp
+                self.kp_box_y_target[first_success_ids, 2 : 2 + ns] = kp[:, :, 1].clone()
+                y0 = self.cfg_task.kp_advance_y_start
+                self.kp_box_local[first_success_ids, 2 : 2 + ns, 1] = y0
         else:
             curr_successes = automate_algo.check_plug_inserted_in_socket(
                 self.held_pos,

@@ -20,7 +20,8 @@ from isaaclab_tasks.direct.factory.factory_env import FactoryEnv
 from . import forge_utils
 from .forge_env_cfg import ForgeEnvCfg
 
-_TIP_OFFSET_LOCAL = [0.0, 0.0, -0.003]
+# RJ45: tip 3 mm below plug USD root. BNC: tip above root (+Z), see BNCSmallMaleCfg.base_height.
+_TIP_OFFSET_RJ45 = (0.0, 0.0, -0.003)
 
 
 class ForgeEnv(FactoryEnv):
@@ -163,8 +164,13 @@ class ForgeEnv(FactoryEnv):
 
         Returns (num_envs, 3) tensor.
         """
+        if self.cfg_task.name == "bnc_insert":
+            bnh = self.cfg_task.held_asset_cfg.base_height
+            tip = (0.0, 0.0, float(bnh))
+        else:
+            tip = _TIP_OFFSET_RJ45
         tip_offset = torch.tensor(
-            _TIP_OFFSET_LOCAL, device=self.device, dtype=torch.float32
+            tip, device=self.device, dtype=torch.float32
         ).unsqueeze(0).expand(self.num_envs, -1)
         tip_world = self.held_pos + torch_utils.quat_rotate(self.held_quat, tip_offset)
         delta_w = tip_world - self.fixed_pos

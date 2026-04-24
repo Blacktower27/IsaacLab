@@ -46,6 +46,12 @@ _BNC_SMALL_DIR = _os.path.normpath(
     )
 )
 
+# Isaac Lab repo root (this file: source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_tasks_cfg.py).
+_FORGE_TASKS_DIR = _os.path.dirname(_os.path.abspath(__file__))
+_ISAACLAB_ROOT = _os.path.normpath(_os.path.join(_FORGE_TASKS_DIR, "..", "..", "..", "..", ".."))
+# Absolute path so ``ForgeEnv`` finds demos even when the training process cwd is not the repo root.
+_BNC_REF_TRAJ_JSON = _os.path.join(_ISAACLAB_ROOT, "scripts", "bnc_ref_traj.json")
+
 
 @configclass
 class ForgeTask(FactoryTask):
@@ -195,18 +201,34 @@ class ForgeBoxLidInsert(ForgeTask):
     hand_init_pitch_noise_deg: float = 0.0  # ±pitch noise (deg)
 
     # --- Init mode ---
-    # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
-    # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
-    # "mixed" : near_init_prob fraction of envs start near, the rest far.
-    init_mode: str = "far"
+    # "near"    : fixed position directly above box (hand_init_pos, deterministic).
+    # "far"     : random XY/Z from hand_init_*_range, yaw aligned to box ± noise.
+    # "mixed"   : near_init_prob fraction of envs start near, the rest far.
+    # "contact" : paired contact on box rear top edge and lid front edge (same left/right half).
+    init_mode: str = "contact"
     near_init_prob: float = 0.5
+
+    # --- Box contact-init geometry (box / lid local frames; metres / degrees) ---
+    # Rear top edge of the box: full X span is split at its midpoint; one random side
+    # (left or right) is chosen per env so box and lid samples use matching halves.
+    box_contact_rear_edge_y_local: float = 0.05
+    box_contact_rear_edge_z_local: float = 0.035
+    box_contact_rear_edge_x_range: list = [-0.06, 0.06]
+    # Front rim of the lid (matches keypoint front face Y/Z used in factory_env).
+    lid_contact_front_edge_y_local: float = -0.0494
+    lid_contact_front_edge_z_local: float = 0.0289
+    lid_contact_front_edge_x_range: list = [-0.0523, 0.0523]
+    # Contact init: same as RJ45 — only small RPY jitter in the box frame (deg).
+    contact_init_roll_range_deg: list = [35.0, 35.0]
+    contact_init_pitch_range_deg: list = [0.0, 0.0]
+    contact_init_yaw_range_deg: list = [-10.0, 10.0]
 
     # --- Fixed asset (box) randomisation ---
     # fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]  # Z=0.05 allows vertical jitter
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]  # Z fixed to table surface
     fixed_asset_init_orn_deg: float = 0.0
     # Full 360° yaw randomisation: the policy must handle the box at any orientation.
-    fixed_asset_init_orn_range_deg: float = 360.0
+    fixed_asset_init_orn_range_deg: float = 0.0
 
     # --- Held asset (lid) in-gripper noise ---
     # Small positional jitter (3 mm per axis) to mimic real-world grasp uncertainty.
@@ -239,13 +261,26 @@ class ForgeBoxLidInsert(ForgeTask):
     # (num_keypoints is unused for box_lid_insert; computed automatically in factory_env.py)
     num_reset_extra_kp: int = 10    # extra front-face keypoints at reset
     num_success_extra_kp: int = 100  # random body keypoints added on first success
+    # Progressive box-side keypoint Y (RJ45-style): lid kps stay at success geometry;
+    # box kps start at kp_advance_y_start and step toward per-kp target Y each step when close.
+    kp_advance_y_start: float = 0.025
+    kp_advance_y_step: float = 0.0002
+    kp_advance_threshold: float = 0.005
+    # Added to **box-side** keypoint Z only (``kp_box_local[:, :, 2]``), metres. Lid targets unchanged.
+    kp_box_z_offset: float = 0.0
+    # Optional **box-frame** clip targets (m) for the Y-ease **end** state (kp indices 0,1).
+    # Lid-side clip locals stay nominal USD; only box-side targets use these so mean_kp_dist
+    # can go near zero at snap success when rel RPY ≠ 0 (clips land slightly off CAD pocket).
+    # Start pose: (X,Z) from here, Y = kp_advance_y_start. Set to None to use legacy matched
+    # lid/box nominal clip locals (-0.0444, 0.0289) for both buffers.
+    kp_box_clip_ease_end_left: list | None = [-0.0252, -0.0437, 0.0274]
+    kp_box_clip_ease_end_right: list | None = [0.0242, -0.0437, 0.0274]
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
-    # Rotation weight for frame_dist = keypoint_dist + rot_weight * rot_dist.
-    # rot_dist is geodesic angle (rad) between held lid and fixed box orientations.
-    # 0.05 ≈ 1 radian error contributes ~50 mm to frame_dist.
-    rot_weight: float = 0.05
+    # Keypoint reward uses frame_dist = keypoint_dist + rot_weight * rot_dist in FactoryEnv.
+    # Box-lid: omit rotation so shaping is purely keypoint (XYZ) alignment.
+    rot_weight: float = 0.0
     # success_threshold < 0.5  → _get_curr_successes uses snap-fit CLIP ENGAGEMENT check
     #   (success_threshold value itself is unused in that branch).
     # engage_threshold  >= 0.5 → _get_curr_successes uses Z-distance height-fraction check:
@@ -256,6 +291,16 @@ class ForgeBoxLidInsert(ForgeTask):
     #   keypoint reward and the sparse clip-engagement success bonus.
     success_threshold: float = 0.04
     engage_threshold: float = 0.9
+
+    # --- Trajectory imitation (Soft-DTW; ``scripts/collect_box_lid_trajectories.py``) ---
+    # Pose JSON uses ``held_tip_pose_local`` = tip in box frame + ``inv(q_box)*q_held`` (wxyz), same as ForgeEnv.
+    ref_traj_json: str = "scripts/box_lid_ref_traj.json"
+    imitation_rwd_scale: float = 1.0
+    num_point_robot_traj: int = 10
+    soft_dtw_gamma: float = 0.01
+    imitation_pose_pos_w: float = 1.0
+    imitation_pose_rot_w: float = 0.35
+    # Set ``ref_traj_json`` to "" to disable. Lower ``imitation_rwd_scale`` if the policy overfits the demo path.
 
     # --- Scene assets ---
     # Box is a kinematic RigidObject: PhysX treats it as infinite-mass static body,
@@ -688,35 +733,87 @@ class ForgeBNCSmallInsert(ForgeTask):
     # "near"  : fixed position directly above socket (hand_init_pos, deterministic).
     # "far"   : random XY/Z from hand_init_*_range, yaw aligned to socket ± noise.
     # "mixed" : near_init_prob fraction of envs start near, the rest far.
-    init_mode: str = "far"
+    # "contact" : RPY jitter in the female (socket) frame, then place the plug so a random
+    #             point in the female bore and a random point on the male tip face coincide
+    #             (see bnc_contact_init_*; same flow as rj45_insert contact mode).
+    init_mode: str = "contact"
     near_init_prob: float = 0.5
 
     # --- Fixed asset (socket) randomisation ---
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
     fixed_asset_init_orn_deg: float = 0.0
     # BNC is cylindrically symmetric -> full 360 deg yaw randomisation.
-    fixed_asset_init_orn_range_deg: float = 360.0
+    fixed_asset_init_orn_range_deg: float = 0.0
 
     # --- Held asset (plug) in-gripper noise ---
     held_asset_pos_noise: list = [0.002, 0.002, 0.002]
     held_asset_rot_init: float = 0.0
-    held_asset_pos_offset: list = [0.0, 0.0, 0.0]
+    held_asset_pos_offset: list = [0.0, 0.0, 0.027]
 
     # --- Reward shaping ---
     contact_penalty_scale: float = 0.0
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
-    rot_weight: float = 0.05
+    rot_weight: float = 1.0
     # engage_threshold > 1.0 -> XY + yaw + tilt alignment check (same as rj45_insert).
     engage_threshold: float = 2.0
-    # success_threshold < 0 -> tip must be 7.5 mm inside socket (0.025 x 0.3 = 7.5 mm).
+    # ENGAGE Z: z_disp = tip_z - opening_z (opening at fixed_asset height). Require tip not more than
+    # this far *above* the opening plane, and (if >0) at least this far *inside* (below) the plane.
+    bnc_engage_z_max_above_opening: float = 0.040
+    bnc_engage_min_depth_m: float = 0.006
+    # success_threshold < 0 -> base depth = height × success_threshold (e.g. 7.5 mm inside).
+    # If bnc_success_min_depth_m > 0, success uses min(that, -min_depth) (see ``factory_env``).
+    # When ``bnc_apply_success_criteria`` is False, success is not used (reward / ep_succeeded latch off).
     success_threshold: float = -0.3
-    # Two-phase keypoints (same strategy as rj45_insert):
-    #   Phase 1: Z-axis keypoints in tip frame (X=Y=0, Z ∈ [-60mm, 0]).
-    #   Phase 2: random body keypoints (XY ∈ ±11mm, Z ∈ [-60mm, 0]).
+    bnc_success_min_depth_m: float = 0.018
+    # Relax SUCCESS depth test by this many metres (tip−opening z_disp vs threshold).
+    bnc_success_z_eps_m: float = 1e-5
+    terminate_on_success: bool = False
+    bnc_apply_success_criteria: bool = True
+    # Keypoints: colinear Z-only in tip frame (X=Y=0). Mean Z = ``bnc_kp_z_center`` is tuned so
+    # that matching targets first corresponds to the plug hovering above the socket opening; as
+    # mean KP distance falls below ``bnc_kp_advance_threshold``, socket-side Z steps down toward the
+    # plug locals (insertion). No phase switch — same KPs for the whole episode.
     num_reset_kp: int = 4
-    num_success_kp: int = 10
+    num_success_kp: int = 4  # legacy field; buffer uses max(num_reset_kp, num_success_kp)
+    # Plug-side Z ~ Uniform[center - half_spread, center + half_spread] (metres; +Z = toward cable).
+    bnc_kp_z_center: float = 0.055
+    bnc_kp_z_half_spread: float = 0.024
+    # Socket-side locals = plug locals + (init_extra + above_engage) on Z at reset; then ease down when close.
+    # ``above_engage`` biases the first good alignment toward tip heights *above* the ENGAGE z band
+    # (``bnc_engage_z_max_above_opening`` on z_disp); tune together with ``bnc_kp_z_center``.
+    bnc_kp_socket_z_init_extra: float = 0.014
+    bnc_kp_socket_z_above_engage_m: float = 0.010
+    bnc_kp_advance_threshold: float = 0.005
+    bnc_kp_advance_step: float = 0.0002
+
+    # --- Trajectory imitation (Soft-DTW; ``scripts/collect_bnc_trajectories.py``) ---
+    # JSON with ``held_tip_pose_local`` (Nx7, socket frame xyz+wxyz) uses pose DTW; position-only if only ``held_tip_local``.
+    ref_traj_json: str = _BNC_REF_TRAJ_JSON
+    imitation_rwd_scale: float = 1.0
+    soft_dtw_gamma: float = 0.01
+    num_point_robot_traj: int = 10
+    imitation_pose_pos_w: float = 1.0
+    imitation_pose_rot_w: float = 0.35
+    # Set ``ref_traj_json`` to "" to disable. Tune ``imitation_rwd_scale`` vs keypoint terms for stability.
+
+    # --- BNC contact-init sampling (FORGE, manual calibration) ---
+    # Future use: one point in the female inner bore/face, one on the male tip face (insertion
+    # end, +Z "top" of the plug in USD; same plane as the physics tip, NOT the cable end).
+    # Each side: fixed Z in that asset's USD frame; XY uniform in [min, max] (axis-aligned box).
+    # Defaults: female opening plane Z=+25 mm, bore ~±8 mm; male tip Z=+36.235 mm (BNCSmallMaleCfg.base_height);
+    # male XY: loose bounds for the annular tip face (tighten in the visualizer to match mesh).
+    bnc_contact_init_female_z_local: float = 0.025
+    bnc_contact_init_female_x_range: list = [-0.008, 0.008]
+    bnc_contact_init_female_y_range: list = [-0.008, 0.008]
+    bnc_contact_init_male_z_local: float = 0.038
+    bnc_contact_init_male_x_range: list = [-0.01035, 0.01035]
+    bnc_contact_init_male_y_range: list = [-0.00915, 0.00915]
+    # Orientation jitter in the female (socket) frame; plus random π yaw for bayonet 0/180 (see reset).
+    contact_init_roll_range_deg: list = [0.0, 0.0]
+    contact_init_pitch_range_deg: list = [0.0, 0.0]
+    contact_init_yaw_range_deg: list = [-10.0, 10.0]
 
     # --- Scene assets (BNC Female socket is kinematic RigidObject) ---
     fixed_asset: RigidObjectCfg = RigidObjectCfg(

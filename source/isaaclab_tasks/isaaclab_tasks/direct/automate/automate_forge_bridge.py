@@ -6,12 +6,11 @@
 """Forge-style success checks for AutoMate assembly tasks (Franka).
 
 Mirrors ``factory_env.FactoryEnv._get_curr_successes`` for ``box_lid_insert``,
-``rj45_insert``, and ``bnc_insert``. For ``rj45_insert`` / ``bnc_insert``:
+``rj45_insert``, and ``bnc_insert``.
 
-- ``success_threshold > 1.0`` → ENGAGE branch (XY + yaw + tilt + loose Z), same as
-  Factory when using ``engage_threshold``-style values.
-- ``success_threshold <= 1.0`` (e.g. Forge ``0.027``) → SUCCESS branch
-  (``height_threshold = fixed_cfg.height + success_threshold``, tight XY).
+- ``rj45_insert``: ``success_threshold > 1.0`` → ENGAGE (XY + yaw + tilt + loose Z).
+- ``bnc_insert``: ``success_threshold > 1.0`` → ENGAGE (XY + π-sym yaw + tilt + Z per cfg).
+- ``success_threshold <= 1.0`` → task-specific SUCCESS branch (BNC: depth + tight XY, no yaw).
 
 Pass ``cfg_task.success_threshold`` through unchanged; do **not** coerce it above 1.0
 unless you intentionally want the ENGAGE branch.
@@ -133,29 +132,36 @@ def get_curr_successes_forge(
         z_disp = held_base_pos[:, 2] - socket_opening_world[:, 2]
         xy_dist = torch.linalg.vector_norm(socket_opening_world[:, 0:2] - held_base_pos[:, 0:2], dim=1)
 
-        _, _, plug_yaw = torch_utils.get_euler_xyz(held_quat)
-        _, _, sock_yaw = torch_utils.get_euler_xyz(fixed_quat)
-        yaw_diff_raw = (plug_yaw - sock_yaw + torch.pi) % (2 * torch.pi) - torch.pi
-        yaw_diff_sym = torch.minimum(yaw_diff_raw.abs(), torch.pi - yaw_diff_raw.abs())
-        _YAW_TOL = 0.175
-        is_yaw = yaw_diff_sym < _YAW_TOL
-        already_succeeded = ep_succeeded > 0
-
         if success_threshold > 1.0:
             is_xy = xy_dist < 0.004
+
+            _, _, plug_yaw = torch_utils.get_euler_xyz(held_quat)
+            _, _, sock_yaw = torch_utils.get_euler_xyz(fixed_quat)
+            yaw_diff_raw = (plug_yaw - sock_yaw + torch.pi) % (2 * torch.pi) - torch.pi
+            yaw_diff_sym = torch.minimum(yaw_diff_raw.abs(), torch.pi - yaw_diff_raw.abs())
+            is_yaw = yaw_diff_sym < 0.175
+            already_succeeded = ep_succeeded > 0
 
             plug_z_local = torch.zeros((num_envs, 3), device=device)
             plug_z_local[:, 2] = -1.0
             plug_z_world = torch_utils.quat_rotate(held_quat, plug_z_local)
             is_tilt = -plug_z_world[:, 2] > 0.966
 
-            is_z = z_disp < 0.040
+            z_loose_max = float(getattr(cfg_task, "bnc_engage_z_max_above_opening", 0.040))
+            min_depth = float(getattr(cfg_task, "bnc_engage_min_depth_m", 0.0))
+            is_z = z_disp < z_loose_max
+            if min_depth > 0.0:
+                is_z = is_z & (z_disp <= -min_depth)
 
             curr_successes = is_xy & (is_yaw | already_succeeded) & is_tilt & is_z
         else:
             height_threshold = fixed_cfg.height * success_threshold
-            is_inside = z_disp < height_threshold
+            succ_min = float(getattr(cfg_task, "bnc_success_min_depth_m", 0.0))
+            if succ_min > 0.0:
+                height_threshold = min(height_threshold, -succ_min)
+            _z_eps = float(getattr(cfg_task, "bnc_success_z_eps_m", 1e-5))
+            is_inside = z_disp <= height_threshold + _z_eps
             is_xy_strict = xy_dist < 0.003
-            curr_successes = is_inside & is_xy_strict & (is_yaw | already_succeeded)
+            curr_successes = is_inside & is_xy_strict
 
     return curr_successes

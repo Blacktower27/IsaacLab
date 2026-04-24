@@ -387,9 +387,6 @@ def _print_info(inner, step, successes: torch.Tensor, engaged: torch.Tensor):
     # Plug yaw vs socket yaw.
     _, _, plug_yaw = euler_xyz_from_quat(held_quat[0:1])
     _, _, sock_yaw = euler_xyz_from_quat(fixed_quat[0:1])
-    yaw_diff_deg = math.degrees(
-        float(((plug_yaw - sock_yaw + math.pi) % (2 * math.pi) - math.pi).item())
-    )
 
     # EE orientation.
     tcp_quat = inner.fingertip_midpoint_quat[0:1]
@@ -401,12 +398,9 @@ def _print_info(inner, step, successes: torch.Tensor, engaged: torch.Tensor):
     def _fmt(v):
         return f"X={v[0]*1000:+6.1f} Y={v[1]*1000:+6.1f} Z={v[2]*1000:+6.1f} mm"
 
-    # BNC yaw alignment with 180° symmetry.
-    _, _, plug_yaw = euler_xyz_from_quat(held_quat[0:1])
-    _, _, sock_yaw = euler_xyz_from_quat(fixed_quat[0:1])
+    # Yaw diagnostic only (Factory BNC engage/success do not gate on yaw).
     yaw_diff_raw = float(((plug_yaw - sock_yaw + math.pi) % (2 * math.pi) - math.pi).item())
     yaw_diff_sym_deg = math.degrees(min(abs(yaw_diff_raw), math.pi - abs(yaw_diff_raw)))
-    yaw_aligned = yaw_diff_sym_deg < 30.0
 
     state_str = "SUCCESS" if successes[0].item() else ("ENGAGED" if engaged[0].item() else "WAITING")
 
@@ -427,12 +421,11 @@ def _print_info(inner, step, successes: torch.Tensor, engaged: torch.Tensor):
         f"  socket opening (env-local): {_fmt(sock0)}\n"
         f"  XY dist tip->socket: {xy_dist_mm:.2f} mm  |  Z gap (tip-socket): {z_gap_mm:+.2f} mm"
         f"  (<0 = inside socket)\n"
-        f"  plug yaw vs socket yaw: {math.degrees(yaw_diff_raw):+.1f} deg  "
-        f"| yaw_sym={yaw_diff_sym_deg:.1f} deg  "
-        f"{'[YAW OK]' if yaw_aligned else '[YAW MISALIGNED]'}  (tol=30 deg, 180-sym)\n"
-        f"  ENGAGE: |XY|<4mm, Z<40mm, yaw_sym<30deg, tilt<15deg\n"
-        f"  SUCCESS: Z_gap < {inner.cfg_task.fixed_asset_cfg.height * inner.cfg_task.success_threshold * 1000:.1f} mm"
-        f"  AND |XY|<3mm AND yaw_sym<30deg\n"
+        f"  plug yaw vs socket yaw (diagnostic): {math.degrees(yaw_diff_raw):+.1f} deg  "
+        f"| yaw_sym={yaw_diff_sym_deg:.1f} deg  (not used for engage/success)\n"
+        f"  ENGAGE: |XY|<4mm, Z per cfg (bnc_engage_*), π-sym yaw, tilt<15deg\n"
+        f"  SUCCESS: Z_gap vs opening per cfg (success_threshold & bnc_success_min_depth_m)"
+        f"  AND |XY|<3mm, no yaw\n"
         f"  EE_ABOVE_OPENING = {_EE_ABOVE_OPENING*1000:.2f} mm"
     )
 

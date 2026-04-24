@@ -128,6 +128,8 @@ class AssemblyTask:
     # Fixed-asset height fraction for which different bonuses are rewarded (see individual tasks).
     success_threshold: float = 0.04
     engage_threshold: float = 0.9
+    # Forge bridge tasks: end episode (terminated) on first success when True (see ``assembly_env._get_dones``).
+    terminate_on_success: bool = False
 
     # SDF reward
     sdf_rwd_scale: float = 1.0
@@ -359,8 +361,8 @@ class BoxLidInsertion(AssemblyTask):
     held_asset_rot_offset: list = [0.0, 35.0, 0.0]
     held_asset_pos_offset: list = [0.0, 0.02, 0.005]
 
-    # Init (Forge: near / far / mixed)
-    init_mode: str = "far"
+    # Init (Forge: near / far / mixed / contact)
+    init_mode: str = "contact"
     near_init_prob: float = 0.5
     hand_init_x_range: list = [-0.05, 0.05]
     hand_init_y_range: list = [0.0, 0.1]
@@ -371,7 +373,10 @@ class BoxLidInsertion(AssemblyTask):
     # Keypoints & reward (Forge multi-scale + frame rotation)
     num_reset_extra_kp: int = 10
     num_success_extra_kp: int = 100
-    rot_weight: float = 0.05
+    kp_advance_y_start: float = -0.04
+    kp_advance_y_step: float = 0.0002
+    kp_advance_threshold: float = 0.005
+    rot_weight: float = 0.0
     action_penalty_ee_scale: float = 0.0
 
     # Reward
@@ -381,6 +386,17 @@ class BoxLidInsertion(AssemblyTask):
     success_threshold: float = 0.04
     engage_threshold: float = 0.9
     close_error_thresh: float = 0.015
+
+    # Box contact-init (same semantics as ForgeBoxLidInsert; used when init_mode == "contact").
+    box_contact_rear_edge_y_local: float = 0.05
+    box_contact_rear_edge_z_local: float = 0.03
+    box_contact_rear_edge_x_range: list = [-0.06, 0.06]
+    lid_contact_front_edge_y_local: float = -0.0444
+    lid_contact_front_edge_z_local: float = 0.0289
+    lid_contact_front_edge_x_range: list = [-0.0523, 0.0523]
+    contact_init_roll_range_deg: list = [0.0, 0.0]
+    contact_init_pitch_range_deg: list = [0.0, 0.0]
+    contact_init_yaw_range_deg: list = [-10.0, 10.0]
 
     # Kinematic box (RigidObject), lid as Articulation — matches Forge (avoids fix_root_link + gpu_max_num_partitions).
     fixed_asset: RigidObjectCfg = RigidObjectCfg(
@@ -671,6 +687,7 @@ class BNCSmallInsertion(AssemblyTask):
     held_asset_rot_offset: list = [0.0, 0.0, 0.0]
     held_asset_pos_offset: list = [0.0, 0.0, 0.0]
 
+    # "contact" : same as ForgeBNCSmallInsert — see bnc_contact_init_* and contact_init_*.
     init_mode: str = "far"
     near_init_prob: float = 0.5
     hand_init_x_range: list = [-0.06, 0.06]
@@ -680,16 +697,38 @@ class BNCSmallInsertion(AssemblyTask):
     hand_init_pitch_noise_deg: float = 0.0
 
     num_reset_kp: int = 4
-    num_success_kp: int = 10
-    rot_weight: float = 0.05
+    num_success_kp: int = 4
+    bnc_kp_z_center: float = 0.055
+    bnc_kp_z_half_spread: float = 0.024
+    bnc_kp_socket_z_init_extra: float = 0.014
+    bnc_kp_socket_z_above_engage_m: float = 0.010
+    bnc_kp_advance_threshold: float = 0.005
+    bnc_kp_advance_step: float = 0.0002
+    # Parity with forge_tasks_cfg.ForgeBNCSmallInsert (contact init).
+    bnc_contact_init_female_z_local: float = 0.025
+    bnc_contact_init_female_x_range: list = [-0.008, 0.008]
+    bnc_contact_init_female_y_range: list = [-0.008, 0.008]
+    bnc_contact_init_male_z_local: float = 0.036235
+    bnc_contact_init_male_x_range: list = [-0.01035, 0.01035]
+    bnc_contact_init_male_y_range: list = [-0.00915, 0.00915]
+    contact_init_roll_range_deg: list = [0.0, 0.0]
+    contact_init_pitch_range_deg: list = [0.0, 0.0]
+    contact_init_yaw_range_deg: list = [-10.0, 10.0]
+    rot_weight: float = 1.0
     action_penalty_ee_scale: float = 0.0
 
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
     success_threshold: float = -0.3
+    bnc_success_min_depth_m: float = 0.018
+    bnc_success_z_eps_m: float = 1e-5
+    bnc_apply_success_criteria: bool = True
+    terminate_on_success: bool = False
     # Unused by Automate reward (no Forge engage term); kept for cfg parity / external tools.
     engage_threshold: float = 2.0
+    bnc_engage_z_max_above_opening: float = 0.040
+    bnc_engage_min_depth_m: float = 0.006
     close_error_thresh: float = 0.015
 
     fixed_asset: RigidObjectCfg = RigidObjectCfg(
