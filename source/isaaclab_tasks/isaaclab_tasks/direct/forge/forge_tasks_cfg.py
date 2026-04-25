@@ -807,7 +807,7 @@ class ForgeBNCSmallInsert(ForgeTask):
     bnc_contact_init_female_z_local: float = 0.025
     bnc_contact_init_female_x_range: list = [-0.008, 0.008]
     bnc_contact_init_female_y_range: list = [-0.008, 0.008]
-    bnc_contact_init_male_z_local: float = 0.038
+    bnc_contact_init_male_z_local: float = 0.028
     bnc_contact_init_male_x_range: list = [-0.01035, 0.01035]
     bnc_contact_init_male_y_range: list = [-0.00915, 0.00915]
     # Orientation jitter in the female (socket) frame; plus random π yaw for bayonet 0/180 (see reset).
