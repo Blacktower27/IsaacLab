@@ -294,7 +294,8 @@ class ForgeBoxLidInsert(ForgeTask):
 
     # --- Trajectory imitation (Soft-DTW; ``scripts/collect_box_lid_trajectories.py``) ---
     # Pose JSON uses ``held_tip_pose_local`` = tip in box frame + ``inv(q_box)*q_held`` (wxyz), same as ForgeEnv.
-    ref_traj_json: str = "scripts/box_lid_ref_traj.json"
+    # ref_traj_json: str = "scripts/box_lid_ref_traj.json"
+    ref_traj_json: str = ""  # disable imitation reward; restore line above to re-enable
     imitation_rwd_scale: float = 1.0
     num_point_robot_traj: int = 10
     soft_dtw_gamma: float = 0.01
@@ -534,7 +535,8 @@ class ForgeRJ45Insert(ForgeTask):
     # --- Trajectory imitation reward ---
     # Path to JSON file with reference trajectories (collected by collect_rj45_trajectories.py).
     # Set to "" to disable the imitation reward entirely.
-    ref_traj_json: str = "scripts/rj45_ref_traj.json"
+    # ref_traj_json: str = "scripts/rj45_ref_traj.json"
+    ref_traj_json: str = ""  # disable imitation reward; restore line above to re-enable
     imitation_rwd_scale: float = 1.0
     num_point_robot_traj: int = 10  # rolling window (matches AutoMate assembly_env)
     soft_dtw_gamma: float = 0.01  # same as AutoMate; use 0 for unsmoothed DTW
@@ -548,7 +550,8 @@ class ForgeRJ45Insert(ForgeTask):
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
-    rot_weight: float = 1.00
+    # rot_weight: float = 1.00
+    rot_weight: float = 0.0
     # engage_threshold > 1.0 → triggers the XY + yaw + tilt alignment check in
     #   _get_curr_successes.  Z is unconstrained — curr_engaged fires whenever the
     #   plug is XY-aligned (tip < 4 mm from opening centre) and correctly oriented
@@ -755,7 +758,8 @@ class ForgeBNCSmallInsert(ForgeTask):
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
-    rot_weight: float = 1.0
+    # rot_weight: float = 1.0
+    rot_weight: float = 0.0
     # engage_threshold > 1.0 -> XY + yaw + tilt alignment check (same as rj45_insert).
     engage_threshold: float = 2.0
     # ENGAGE Z: z_disp = tip_z - opening_z (opening at fixed_asset height). Require tip not more than
@@ -790,7 +794,8 @@ class ForgeBNCSmallInsert(ForgeTask):
 
     # --- Trajectory imitation (Soft-DTW; ``scripts/collect_bnc_trajectories.py``) ---
     # JSON with ``held_tip_pose_local`` (Nx7, socket frame xyz+wxyz) uses pose DTW; position-only if only ``held_tip_local``.
-    ref_traj_json: str = _BNC_REF_TRAJ_JSON
+    # ref_traj_json: str = _BNC_REF_TRAJ_JSON
+    ref_traj_json: str = ""  # disable imitation reward; restore line above to re-enable
     imitation_rwd_scale: float = 1.0
     soft_dtw_gamma: float = 0.01
     num_point_robot_traj: int = 10
