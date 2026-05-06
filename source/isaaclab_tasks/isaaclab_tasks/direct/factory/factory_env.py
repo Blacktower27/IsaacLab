@@ -115,25 +115,6 @@ class FactoryEnv(DirectRLEnv):
             self.kp_rj45_female_z_init = self.cfg_task.female_rear_edge_z_local
             self.kp_rj45_male_local  = torch.zeros((self.num_envs, _N_RJ45_KP, 3), device=self.device)
             self.kp_rj45_female_local = torch.zeros((self.num_envs, _N_RJ45_KP, 3), device=self.device)
-        # [CUSTOM] OLD: Fixed triangle keypoints for rj45_insert (kept for reference).
-        # if self.cfg_task.name == "rj45_insert":
-        #     x_lo, x_hi = self.cfg_task.male_bottom_patch_x_range_local
-        #     y_lo, y_hi = self.cfg_task.male_bottom_patch_y_range_local
-        #     z = self.cfg_task.male_bottom_patch_z_local
-        #     self.kp_rj45_male_local = torch.tensor([
-        #         [0.0,  y_hi, z],   # front centre
-        #         [x_lo, y_lo, z],   # back left
-        #         [x_hi, y_lo, z],   # back right
-        #     ], dtype=torch.float32, device=self.device).unsqueeze(0).expand(self.num_envs, -1, -1).clone()
-        #     z_f = self.cfg_task.female_rear_edge_z_local
-        #     plug_dy = self.cfg_task.socket_target_y_local
-        #     self.kp_rj45_female_z_init = z_f
-        #     self.kp_rj45_female_local = torch.tensor([
-        #         [0.0,   y_hi + plug_dy, z_f],   # front centre
-        #         [x_lo,  y_lo + plug_dy, z_f],   # back left
-        #         [x_hi,  y_lo + plug_dy, z_f],   # back right
-        #     ], dtype=torch.float32, device=self.device).unsqueeze(0).expand(self.num_envs, -1, -1).clone()
-
         # [CUSTOM] Per-episode keypoints for bnc_insert: Z-only on plug; socket-side Z eases down
         # when close. Buffer size = max(num_reset_kp, num_success_kp).
         if self.cfg_task.name == "bnc_insert":
@@ -689,11 +670,6 @@ class FactoryEnv(DirectRLEnv):
 
         else:
             raise NotImplementedError("Task not implemented")
-        
-        # is_close_or_below = torch.where(
-        #     z_disp < height_threshold, torch.ones_like(curr_successes), torch.zeros_like(curr_successes)
-        # )
-        # curr_successes = torch.logical_and(is_centered, is_close_or_below)
 
         if check_rot:
             _, _, curr_yaw = torch_utils.get_euler_xyz(self.fingertip_midpoint_quat)
@@ -715,18 +691,6 @@ class FactoryEnv(DirectRLEnv):
 
         first_success_ids = first_success.nonzero(as_tuple=False).squeeze(-1)
         self.ep_success_times[first_success_ids] = self.episode_length_buf[first_success_ids]
-
-        # [CUSTOM] RJ45 Phase 2: on first success, replace Z-axis keypoints with random body
-        # keypoints spread across the connector head volume (full XYZ).  Denser signal for
-        # sustained deep insertion once the plug is initially aligned and partially inserted.
-        # if self.cfg_task.name == "rj45_insert" and len(first_success_ids) > 0:
-        #     ns = self.cfg_task.num_success_kp
-        #     r = torch.rand((len(first_success_ids), ns, 3), device=self.device)
-        #     # Offsets in TIP frame (Z=0 at tip).  Connector cross-section + shallow depth zone.
-        #     # X ∈ [-18.75mm, +18.75mm], Y ∈ [-5mm, +13mm], Z ∈ [0, +14mm] (tip → connector face area)
-        #     self.kp_rj45_local[first_success_ids, :ns, 0] = r[:, :, 0] * 0.0375 - 0.01875
-        #     self.kp_rj45_local[first_success_ids, :ns, 1] = r[:, :, 1] * 0.0182 - 0.00503
-        #     self.kp_rj45_local[first_success_ids, :ns, 2] = r[:, :, 2] * 0.014
 
         # [CUSTOM] For box_lid_insert: on first success, keep the 2 clip keypoints (index 0,1)
         # and replace index 2..2+ns-1 with random keypoints spread across the lid body.
@@ -906,9 +870,6 @@ class FactoryEnv(DirectRLEnv):
         curr_engaged = self._get_curr_successes(success_threshold=self.cfg_task.engage_threshold, check_rot=False)
 
         rew_dict = {
-            # "kp_baseline": factory_utils.squashing_fn(keypoint_dist, a0, b0),
-            # "kp_coarse": factory_utils.squashing_fn(keypoint_dist, a1, b1),
-            # "kp_fine": factory_utils.squashing_fn(keypoint_dist, a2, b2),
             "kp_baseline": factory_utils.squashing_fn(frame_dist, a0, b0),
             "kp_coarse": factory_utils.squashing_fn(frame_dist, a1, b1),
             "kp_fine": factory_utils.squashing_fn(frame_dist, a2, b2),
@@ -966,13 +927,6 @@ class FactoryEnv(DirectRLEnv):
             self.kp_rj45_female_local[env_ids, :, 0] = x_rand
             self.kp_rj45_female_local[env_ids, :, 1] = y_rand + plug_dy
             self.kp_rj45_female_local[env_ids, :, 2] = z_f
-        # [CUSTOM] OLD: Z-axis only keypoints (kept for reference).
-        # if self.cfg_task.name == "rj45_insert":
-        #     nr = self.cfg_task.num_reset_kp
-        #     self.kp_rj45_local[env_ids] = 0.0
-        #     r = torch.rand((len(env_ids), nr), device=self.device)
-        #     self.kp_rj45_local[env_ids, :nr, 2] = r * (0.08847 + 0.003)
-
         # [CUSTOM] BNC: Z-axis keypoints; Z ~ center ± half_spread on plug, socket + init extra on Z.
         if self.cfg_task.name == "bnc_insert":
             nr = self.cfg_task.num_reset_kp
@@ -1639,30 +1593,11 @@ class FactoryEnv(DirectRLEnv):
             q1=fingertip_flipped_quat, t1=fingertip_flipped_pos, q2=asset_in_hand_quat, t2=asset_in_hand_pos
         )
 
-        
-        
-        # Set _DEBUG_OBSERVE_S = 0.0 to disable.
-        # DEBUG: pause before closing gripper so you can inspect object placement.
-        # print("Debug observe...")
-        # _DEBUG_OBSERVE_S = 20.0
-        # _t = 0.0
-        # if not hasattr(self, "task_prop_gains"):
-        #     self.task_prop_gains = self.default_gains.clone()
-        #     self.task_deriv_gains = factory_utils.get_deriv_gains(self.task_prop_gains)
-        # while _t < _DEBUG_OBSERVE_S:
-        #     self.close_gripper_in_place()
-        #     self.scene.write_data_to_sim()
-        #     self.sim.step(render=True)  # render=True prevents Fabric clone failure
-        #     self.scene.update(dt=self.physics_dt)
-        #     self._compute_intermediate_values(dt=self.physics_dt)
-        #     _t += self.sim.get_physics_dt()
-        # print("Done observing, closing gripper...")
-        
-        # Add asset in hand randomization
-        # rand_sample = torch.rand((self.num_envs, 3), dtype=torch.float32, device=self.device)
-        # held_asset_pos_noise = 2 * (rand_sample - 0.5)  # [-1, 1]
+        # Asset-in-hand noise sample. Currently zero (no randomisation): the per-task
+        # held_asset_pos_noise scaling below is also typically zero or near-zero, but kept
+        # for the upstream Factory tasks that use it.
         rand_sample = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
-        held_asset_pos_noise = 2 * (rand_sample)  # [-1, 1]
+        held_asset_pos_noise = 2 * (rand_sample)
         if self.cfg_task.name == "gear_mesh":
             held_asset_pos_noise[:, 2] = -rand_sample[:, 2]  # [-1, 0]
 
@@ -1684,24 +1619,6 @@ class FactoryEnv(DirectRLEnv):
             self._held_asset.write_root_pose_to_sim(held_state[:, 0:7])
             self._held_asset.write_root_velocity_to_sim(held_state[:, 7:])
             self._held_asset.reset()
-
-        # DEBUG: pause before closing gripper so you can inspect object placement.
-        # This runs before the "Close hand" gain setup below; ForgeEnv also sets task_prop_gains
-        # only after super()._reset_idx. Seed default PD gains for close_gripper_in_place.
-        # if not hasattr(self, "task_prop_gains"):
-        #     self.task_prop_gains = self.default_gains.clone()
-        #     self.task_deriv_gains = factory_utils.get_deriv_gains(self.task_prop_gains)
-        # print("Debug observe...")
-        # _DEBUG_OBSERVE_S = 20.0
-        # _t = 0.0
-        # while _t < _DEBUG_OBSERVE_S:
-        #     self.close_gripper_in_place()
-        #     self.scene.write_data_to_sim()
-        #     self.sim.step(render=True)  # render=True prevents Fabric clone failure
-        #     self.scene.update(dt=self.physics_dt)
-        #     self._compute_intermediate_values(dt=self.physics_dt)
-        #     _t += self.sim.get_physics_dt()
-        # print("Done observing, closing gripper...")
 
         #  Close hand
         # Set gains to use for quick resets.

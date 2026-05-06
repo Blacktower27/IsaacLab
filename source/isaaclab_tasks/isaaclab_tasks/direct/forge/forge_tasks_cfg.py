@@ -178,9 +178,7 @@ class ForgeBoxLidInsert(ForgeTask):
     # hand_init_pos[2] = 0.05 m: lid body bottom sits ~20 mm above box top,
     # clear of box walls. Engage-zone initialization is geometrically infeasible:
     # any clip-in-pocket position requires lid body inside box cavity → penetration.
-    # hand_init_pos: list = [0.00, 0.07, 0.043] #for franka
     hand_init_pos: list = [0.00, 0.07, 0.034]  # [x, y, z] box-local; z used as fallback only
-    # hand_init_pos_noise: list = [0.02, 0.02, 0.01]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     # hand_init_orn = [roll, pitch, yaw] in radians.  π on roll = EE pointing down.
     hand_init_orn: list = [3.1416, 0.0, 0.0]
@@ -195,8 +193,6 @@ class ForgeBoxLidInsert(ForgeTask):
     hand_init_x_range: list = [-0.05, 0.05]   # X in box-local frame (m)
     hand_init_y_range: list = [0.0,   0.1]   # Y in box-local frame, back half (m)
     hand_init_z_range: list = [0.055, 0.085]  # Z above box top (m)
-    # hand_init_yaw_noise_deg: float = 20.0     # ±yaw noise (deg) on top of box-aligned yaw
-    # hand_init_pitch_noise_deg: float = 20.0   # ±pitch noise (deg)
     hand_init_yaw_noise_deg: float = 20.0   # ±yaw noise (deg) on top of box-aligned yaw
     hand_init_pitch_noise_deg: float = 0.0  # ±pitch noise (deg)
 
@@ -224,10 +220,9 @@ class ForgeBoxLidInsert(ForgeTask):
     contact_init_yaw_range_deg: list = [-10.0, 10.0]
 
     # --- Fixed asset (box) randomisation ---
-    # fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.05]  # Z=0.05 allows vertical jitter
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]  # Z fixed to table surface
     fixed_asset_init_orn_deg: float = 0.0
-    # Full 360° yaw randomisation: the policy must handle the box at any orientation.
+    # Full 360° yaw randomisation supported; current default 0° keeps the box axis-aligned.
     fixed_asset_init_orn_range_deg: float = 0.0
 
     # --- Held asset (lid) in-gripper noise ---
@@ -235,23 +230,18 @@ class ForgeBoxLidInsert(ForgeTask):
     held_asset_pos_noise: list = [0.003, 0.003, 0.003]
     # held_asset_rot_init = base yaw of the lid in the flipped fingertip frame.
     # 90° aligns the lid's long axis with the robot's approach direction.
-    held_asset_rot_init: float = 90.0# for franka
-    # held_asset_rot_init: float = 0.0
+    held_asset_rot_init: float = 90.0
     # held_asset_rot_offset = additional [roll, pitch, yaw] in degrees on top of
     # held_asset_rot_init.  pitch=35° tilts the lid slightly forward so the handle
     # clears the finger pads during the closing step.
-    held_asset_rot_offset: list = [0.0, 35.0, 0.0]# for franka
-    # held_asset_rot_offset: list = [0.0,0, 0.0]
-    # held_asset_rot_offset: list = [0.0, 0.0, 0.0]
+    held_asset_rot_offset: list = [0.0, 35.0, 0.0]
     # held_asset_pos_offset = fine-tune translation [x, y, z] in the flipped
     # fingertip frame (metres).  y=0.02 shifts the lid 20 mm "inward" so the
     # handle is centred between the finger pads; z=0.005 compensates for the
     # 5 mm height difference between finger pad centre and handle top.
     held_asset_pos_offset: list = [0.0, 0.02, 0.005]
-    # held_asset_pos_offset: list = [0.0, 0.0, -0.01]
 
     # --- Reward shaping (same structure as ForgePegInsert) ---
-    # contact_penalty_scale: float = 0.2
     contact_penalty_scale: float = 0
     # Keypoint layout:
     #   index 0,1          = left/right clip positions (always fixed)
@@ -330,8 +320,7 @@ class ForgeBoxLidInsert(ForgeTask):
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.001, rest_offset=0.0),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            # pos=(0.6, 0.0, 0.05),  # 0.05: bolt-fixture height used by other Factory tasks
-            pos=(0.6, 0.0, 0.0), rot=(1.0, 0.0, 0.0, 0.0)  # 0.0: box base flush with table surface
+            pos=(0.6, 0.0, 0.0), rot=(1.0, 0.0, 0.0, 0.0)  # box base flush with table surface
         ),
     )
     held_asset: ArticulationCfg = ArticulationCfg(
@@ -453,10 +442,7 @@ class ForgeRJ45Insert(ForgeTask):
 
     # --- Robot initial state (TCP height above socket USD origin) ---
     # Geometry: cavity entrance = socket_origin + 17 mm; TCP-to-tip offset = 64 mm.
-    # Formula: TCP_above_origin = tip_above_cavity + 0.017 + 0.064
-    # Near mode: tip 30 mm above cavity entrance → TCP = 0.030 + 0.081 = 0.111 m
-    # hand_init_pos: list = [0.00, 0.00, 0.111]
-    # hand_init_pos: list = [0.00, -0.006, 0.064]
+    # Formula: TCP_above_origin = tip_above_cavity + 0.017 + 0.064.
     hand_init_pos: list = [0.00, -0.006, 0.064]
     hand_init_pos_noise: list = [0.0, 0.0, 0.0]
     hand_init_orn: list = [3.1416, 0.0, 0.0]   # EE pointing down
@@ -468,8 +454,7 @@ class ForgeRJ45Insert(ForgeTask):
     # [0.091, 0.231] → tip 10 mm to 150 mm above cavity entrance
     hand_init_x_range: list = [-0.03, 0.01]   # ±60 mm from socket axis
     hand_init_y_range: list = [-0.02, 0.02]   # ±60 mm from socket axis
-    # hand_init_z_range: list = [0.071, 0.081]  # for kuka
-    hand_init_z_range: list = [0.081, 0.091]  # for franka
+    hand_init_z_range: list = [0.081, 0.091]
     hand_init_yaw_noise_deg: float = 10.0      # ±30° from socket yaw (no pitch)
     hand_init_pitch_noise_deg: float = 0.0     # no pitch noise for plug tasks
     hand_init_yaw_offset_deg: float = 0.0    # fixed yaw offset (deg) added on top of socket-yaw alignment
@@ -523,7 +508,7 @@ class ForgeRJ45Insert(ForgeTask):
     # --- Fixed asset (socket) randomisation ---
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
     fixed_asset_init_orn_deg: float = 0.0
-    # fixed_asset_init_orn_range_deg: float = 360.0
+    # 360° yaw randomisation supported; current default 0° keeps the socket axis-aligned.
     fixed_asset_init_orn_range_deg: float = 0.0
 
     # --- Held asset (plug) in-gripper noise ---
@@ -546,11 +531,9 @@ class ForgeRJ45Insert(ForgeTask):
 
     # --- Reward shaping ---
     contact_penalty_scale: float = 0.05
-    # contact_penalty_scale: float = 0.05
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
-    # rot_weight: float = 1.00
     rot_weight: float = 0.0
     # engage_threshold > 1.0 → triggers the XY + yaw + tilt alignment check in
     #   _get_curr_successes.  Z is unconstrained — curr_engaged fires whenever the
@@ -745,7 +728,7 @@ class ForgeBNCSmallInsert(ForgeTask):
     # --- Fixed asset (socket) randomisation ---
     fixed_asset_init_pos_noise: list = [0.05, 0.05, 0.0]
     fixed_asset_init_orn_deg: float = 0.0
-    # BNC is cylindrically symmetric -> full 360 deg yaw randomisation.
+    # BNC is cylindrically symmetric -> 360° yaw randomisation supported; current default 0°.
     fixed_asset_init_orn_range_deg: float = 0.0
 
     # --- Held asset (plug) in-gripper noise ---
@@ -758,7 +741,6 @@ class ForgeBNCSmallInsert(ForgeTask):
     keypoint_coef_baseline: list = [5, 4]
     keypoint_coef_coarse: list = [50, 2]
     keypoint_coef_fine: list = [100, 0]
-    # rot_weight: float = 1.0
     rot_weight: float = 0.0
     # engage_threshold > 1.0 -> XY + yaw + tilt alignment check (same as rj45_insert).
     engage_threshold: float = 2.0

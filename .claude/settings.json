@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('source/isaaclab_tasks/isaaclab_tasks/direct/forge/__init__.py'\\).read\\(\\)\\)\")",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_env.py','source/isaaclab_tasks/isaaclab_tasks/direct/forge/forge_tasks_cfg.py','source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py']]; print\\('OK'\\)\")"
+    ]
+  }
+}
